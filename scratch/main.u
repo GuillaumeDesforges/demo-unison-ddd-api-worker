@@ -1,7 +1,9 @@
 use lib.runarorama_sqlite_1_0_1 Sqlite
 use lib.unison_http_16_1_0 HttpRequest HttpResponse Body Version Headers
 use lib.unison_http_16_1_0.server Config Routes Handler
+use lib.unison_http_16_1_0.client Http
 use lib.unison_json_1_4_2.core Json
+use lib.unison_json_1_4_2 Decoder
 use lib.guillaumedesforges_restate_sdk_unison_main Restate
 use lib.guillaumedesforges_restate_sdk_unison_main.Restate.Ctx ctx
 use lib.guillaumedesforges_restate_sdk_unison_main.Restate AwakeableHandle Input HandlerDef ServiceDef Endpoint
@@ -332,3 +334,57 @@ Demo.Worker.main = do
   svc = ServiceDef.ServiceDef "ModerationService" RsService [hdl]
   Threads.run do
     Endpoint.serve 9080 [svc]
+
+-- ============================================================
+-- Claude API classifier
+-- ============================================================
+
+AIClassifier.callClaude : Text -> Text ->{Exception, Http} Text
+AIClassifier.callClaude apiKey text =
+  uri = URI.parse "https://api.anthropic.com/v1/messages"
+  msg  = Json.object [("role", Json.text "user"), ("content", Json.text ("Classify this content for moderation. Reply with ONE word only: Approve, Reject, or Escalate.\nContent: " Text.++ text))]
+  body = Json.object [("model", Json.text "claude-haiku-4-5-20251001"), ("max_tokens", Json.Number "10"), ("messages", Json.array [msg])]
+  req0 = HttpRequest.post uri (Body.fromText (Json.toText body))
+  req1 = HttpRequest.addHeader "content-type" "application/json" req0
+  req2 = HttpRequest.addHeader "anthropic-version" "2023-06-01" req1
+  req  = HttpRequest.addHeader "x-api-key" apiKey req2
+  resp = Http.request req
+  respBody = HttpResponse.bodyText resp
+  decoder = do
+    Decoder.object.at! "content" do
+      Decoder.array.at! 0 do
+        Decoder.object.at! "text" Decoder.text
+  Decoder.run decoder respBody
+
+AIClassifier.parseDecisionText : Text -> ModerationDecision
+AIClassifier.parseDecisionText t =
+  if Text.startsWith "Approve" t then Approve
+  else if Text.startsWith "Reject" t then Reject t
+  else Escalate t
+
+-- Direct mode: Claude API via Threads.run + Http.handler
+AIClassifier.claudeDirectHandler : Text -> '{g, AIClassifier} a ->{g, IO, Exception} a
+AIClassifier.claudeDirectHandler apiKey action =
+  go = cases
+    { a } -> a
+    { AIClassifier.classify text -> k } ->
+      decision = Threads.run do
+        decText = handle (AIClassifier.callClaude apiKey text) with Http.handler
+        AIClassifier.parseDecisionText decText
+      handle k decision with go
+  handle action() with go
+
+-- Restate mode: Claude API inside ctx.run (journaled for durability)
+AIClassifier.claudeRestateHandler : Text -> '{g, AIClassifier} a ->{g, Restate.Ctx, IO, Exception} a
+AIClassifier.claudeRestateHandler apiKey action =
+  go = cases
+    { a } -> a
+    { AIClassifier.classify text -> k } ->
+      bs = ctx.run "classify" do
+        decText = Threads.run do
+          handle (AIClassifier.callClaude apiKey text) with Http.handler
+        (tag, _) = ModerationDecision.toRow (AIClassifier.parseDecisionText decText)
+        Text.toUtf8 tag
+      decision = ModerationDecision.fromRow (Text.fromUtf8 bs) None
+      handle k decision with go
+  handle action() with go

@@ -134,7 +134,7 @@ demo-unison-ddd-api-worker/
 
 ## Status
 
-**Phase: Stage 3 — Restate interpreter (worker, Restate mode) — implementation complete, integration test pending.**
+**Phase: Stage 4 — Polish — complete.**
 
 ## Roadmap
 
@@ -163,8 +163,11 @@ demo-unison-ddd-api-worker/
 - [x] Integration test script: insert content → invoke via Restate ingress → verify AutoModerated Approve (`scripts/test-restate-mode.sh`)
 - [ ] Integration test: human review flow via awakeable (manual steps documented in script)
 
-### Stage 4 — Polish
+### Stage 4 — Polish ✅
 
-- [ ] Claude API interpreter for `AIClassifier` (replaces stub)
-- [ ] `scripts/test-integration.sh` covering both modes
-- [ ] README with architecture diagram and quick-start
+- [x] Claude API interpreter for `AIClassifier` (`claudeDirectHandler`, `claudeRestateHandler`)
+  - `callClaude`: POST to Claude API, parse `content[0].text` from response
+  - Wraps in `ctx.run` for Restate mode durability
+  - Uses `Threads.run do handle ... with Http.handler` inside `ctx.run` thunk
+- [x] `scripts/test-integration.sh` covering both modes
+- [x] README with architecture diagram and quick-start
