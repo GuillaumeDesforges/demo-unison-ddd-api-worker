@@ -160,8 +160,8 @@ demo-unison-ddd-api-worker/
 - [x] Restate `ctx.run` interpreter for `ContentStore` (saves durable; reads direct)
 - [x] Restate awakeable interpreter for `HumanReview` (creates awakeable, stores ID in SQLite)
 - [x] `Demo.Worker.main` Restate service endpoint (port 9080, `ModerationService/moderate`)
-- [ ] Integration test: submit via HTTP API → worker runs saga durably → poll HTTP API for result
-- [ ] Integration test: human review flow via awakeable
+- [x] Integration test script: insert content → invoke via Restate ingress → verify AutoModerated Approve (`scripts/test-restate-mode.sh`)
+- [ ] Integration test: human review flow via awakeable (manual steps documented in script)
 
 ### Stage 4 — Polish
 
