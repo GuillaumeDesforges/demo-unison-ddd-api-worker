@@ -1,101 +1,97 @@
-use Map
+use lib.unison_json_1_4_2.core Json
+use lib.unison_json_1_4_2 Decoder
 
 -- ============================================================
--- Pure stub handlers for unit testing
+-- JSON encoding — domain types → Json for API responses
 -- ============================================================
 
-ContentStore.runPure : Map ContentId Content -> '{g, ContentStore} a ->{g} (Map ContentId Content, a)
-ContentStore.runPure initialStore action =
-  go store = cases
-    { a } -> (store, a)
-    { ContentStore.getContent cid -> k } ->
-      handle k (Map.lookup cid store) with go store
-    { ContentStore.saveContent c -> k } ->
-      handle k () with go (Map.insert (Content.id c) c store)
-  handle action() with go initialStore
+ModerationDecision.toJson : ModerationDecision -> Json
+ModerationDecision.toJson = cases
+  Approve         -> Json.object [("type", Json.text "Approve")]
+  Reject reason   -> Json.object [("type", Json.text "Reject"), ("reason", Json.text reason)]
+  Escalate reason -> Json.object [("type", Json.text "Escalate"), ("reason", Json.text reason)]
 
-AIClassifier.runPure : ModerationDecision -> '{g, AIClassifier} a ->{g} a
-AIClassifier.runPure decision action =
-  go = cases
-    { a } -> a
-    { AIClassifier.classify _ -> k } ->
-      handle k decision with go
-  handle action() with go
+ContentStatus.toJson : ContentStatus -> Json
+ContentStatus.toJson = cases
+  Submitted            -> Json.object [("type", Json.text "Submitted")]
+  AutoModerated d      -> Json.object [("type", Json.text "AutoModerated"), ("decision", ModerationDecision.toJson d)]
+  PendingHumanReview d -> Json.object [("type", Json.text "PendingHumanReview"), ("decision", ModerationDecision.toJson d)]
+  Resolved d           -> Json.object [("type", Json.text "Resolved"), ("decision", ModerationDecision.toJson d)]
 
-Notifier.runPure : '{g, Notifier} a ->{g} ([(Text, ModerationDecision)], a)
-Notifier.runPure action =
-  go notifs = cases
-    { a } -> (notifs, a)
-    { Notifier.notify authorId decision -> k } ->
-      handle k () with go (notifs :+ (authorId, decision))
-  handle action() with go []
+ContentId.unwrap : ContentId -> Text
+ContentId.unwrap = cases ContentId t -> t
 
-HumanReview.runPure : ModerationDecision -> '{g, HumanReview} a ->{g} a
-HumanReview.runPure decision action =
-  go = cases
-    { a } -> a
-    { HumanReview.waitForDecision _ -> k } ->
-      handle k decision with go
-  handle action() with go
-
--- Run the saga with all stub interpreters.
--- Returns the final content store and the list of notifications emitted.
-Saga.runTest :
-  Map ContentId Content ->
-  ModerationDecision ->
-  ModerationDecision ->
-  Content ->
-  (Map ContentId Content, [(Text, ModerationDecision)])
-Saga.runTest initialStore aiDecision humanDecision content =
-  noHumanReview = do HumanReview.runPure humanDecision (do moderationSaga content)
-  noAI          = do AIClassifier.runPure aiDecision noHumanReview
-  (finalStore, (notifs, _)) =
-    ContentStore.runPure initialStore (do Notifier.runPure noAI)
-  (finalStore, notifs)
+Content.toJson : Content -> Json
+Content.toJson c =
+  Json.object [
+    ("id",        Json.text (ContentId.unwrap (Content.id c))),
+    ("authorId",  Json.text (Content.authorId c)),
+    ("text",      Json.text (Content.text c)),
+    ("createdAt", Json.nat  (Content.createdAt c)),
+    ("status",    ContentStatus.toJson (Content.status c))
+  ]
 
 -- ============================================================
--- Moderation saga
+-- JSON decoding — request bodies → domain types
 -- ============================================================
 
-moderationSaga : Content ->{ContentStore, AIClassifier, Notifier, HumanReview} ()
-moderationSaga content =
-  saveContent (Content.status.set Submitted content)
-  decision = classify (Content.text content)
-  match decision with
-    Escalate _ ->
-      saveContent (Content.status.set (PendingHumanReview decision) content)
-      humanDecision = waitForDecision (Content.id content)
-      saveContent (Content.status.set (Resolved humanDecision) content)
-      notify (Content.authorId content) humanDecision
-    _ ->
-      saveContent (Content.status.set (AutoModerated decision) content)
-      notify (Content.authorId content) decision
+-- Decodes POST /content body: { "id", "authorId", "text" }
+SubmitRequest.decode : Text ->{Exception} (ContentId, Text, Text)
+SubmitRequest.decode body =
+  decoder = do
+    cid      = Decoder.object.at! "id" Decoder.text
+    authorId = Decoder.object.at! "authorId" Decoder.text
+    txt      = Decoder.object.at! "text" Decoder.text
+    (ContentId cid, authorId, txt)
+  Decoder.run decoder body
+
+-- Decodes POST /content/:id/review body: { "decision", "reason"? }
+ReviewRequest.decode : Text ->{Exception} ModerationDecision
+ReviewRequest.decode body =
+  decoder = do
+    decision = Decoder.object.at! "decision" Decoder.text
+    match decision with
+      "Approve" -> Approve
+      "Reject"  ->
+        reason = Decoder.object.at! "reason" Decoder.text
+        Reject reason
+      _ -> Decoder.fail ("Unknown decision: " Text.++ decision)
+  Decoder.run decoder body
 
 -- ============================================================
--- Tests
+-- JSON codec tests
 -- ============================================================
 
-test> moderationSaga.tests.approve =
-  content = Content (ContentId "c1") "alice" "hello world" 0 Submitted
-  (store, notifs) = Saga.runTest Map.empty Approve Approve content
+test> ModerationDecision.toJson.tests.approve =
   test.verify do
-    test.ensureEqual (Some (Content.status.set (AutoModerated Approve) content))
-                     (Map.lookup (ContentId "c1") store)
-    test.ensureEqual [("alice", Approve)] notifs
+    test.ensureEqual
+      (Json.object [("type", Json.text "Approve")])
+      (ModerationDecision.toJson Approve)
 
-test> moderationSaga.tests.reject =
-  content = Content (ContentId "c2") "bob" "buy cheap pills" 0 Submitted
-  (store, notifs) = Saga.runTest Map.empty (Reject "spam") Approve content
+test> ModerationDecision.toJson.tests.reject =
   test.verify do
-    test.ensureEqual (Some (Content.status.set (AutoModerated (Reject "spam")) content))
-                     (Map.lookup (ContentId "c2") store)
-    test.ensureEqual [("bob", Reject "spam")] notifs
+    test.ensureEqual
+      (Json.object [("type", Json.text "Reject"), ("reason", Json.text "spam")])
+      (ModerationDecision.toJson (Reject "spam"))
 
-test> moderationSaga.tests.escalate =
-  content = Content (ContentId "c3") "carol" "maybe ok?" 0 Submitted
-  humanDecision = Approve
-  (store, notifs) = Saga.runTest Map.empty (Escalate "uncertain") humanDecision content
+test> ModerationDecision.toJson.tests.escalate =
   test.verify do
-    test.ensureEqual (Some (Content.status.set (Resolved Approve) content))
-                     (Map.lookup (ContentId "c3") store)
-    test.ensureEqual [("carol", Approve)] notifs
+    test.ensureEqual
+      (Json.object [("type", Json.text "Escalate"), ("reason", Json.text "uncertain")])
+      (ModerationDecision.toJson (Escalate "uncertain"))
+
+test> SubmitRequest.decode.tests.example =
+  test.verify do
+    body = "{\"id\":\"c1\",\"authorId\":\"alice\",\"text\":\"hello world\"}"
+    test.ensureEqual (ContentId "c1", "alice", "hello world")
+                     (SubmitRequest.decode body)
+
+test> ReviewRequest.decode.tests.approve =
+  test.verify do
+    test.ensureEqual Approve
+                     (ReviewRequest.decode "{\"decision\":\"Approve\"}")
+
+test> ReviewRequest.decode.tests.reject =
+  test.verify do
+    test.ensureEqual (Reject "spam")
+                     (ReviewRequest.decode "{\"decision\":\"Reject\",\"reason\":\"spam\"}")
