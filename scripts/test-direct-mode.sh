@@ -5,12 +5,12 @@ set -euo pipefail
 DB=$(mktemp /tmp/moderation-XXXXXX.db)
 trap "rm -f '$DB'" EXIT
 
-API_PORT=18080
+API_PORT=8080
 BASE="http://localhost:$API_PORT"
 CID="550e8400-e29b-41d4-a716-446655440001"
 
 # Start the API server in the background
-DB_PATH="$DB" ucm run Demo.Api.main &
+DB_PATH="$DB" ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Api.main' &
 API_PID=$!
 trap "kill $API_PID 2>/dev/null; rm -f '$DB'" EXIT
 

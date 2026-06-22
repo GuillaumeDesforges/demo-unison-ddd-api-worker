@@ -28,7 +28,7 @@ echo "=== Direct mode ==="
 
 DB_DIRECT=$(mktemp /tmp/mod-direct-XXXXXX.db)
 CID_DIRECT="550e8400-e29b-41d4-a716-000000000001"
-DB_PATH="$DB_DIRECT" ucm run Demo.Api.main &
+DB_PATH="$DB_DIRECT" ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Api.main' &
 API_PID=$!
 trap "kill $API_PID 2>/dev/null || true; rm -f '$DB_DIRECT'" EXIT
 
@@ -64,7 +64,7 @@ CID_RESTATE="550e8400-e29b-41d4-a716-000000000002"
 if ! curl -sf "$RESTATE_ADMIN/health" >/dev/null 2>&1; then
   echo "  SKIP Restate server not running (start with: restate-server --base-dir \$(mktemp -d))"
 elif ! curl -sf "$WORKER_URL/discover" >/dev/null 2>&1; then
-  echo "  SKIP Worker not running (start with: DB_PATH=$DB_RESTATE ucm run Demo.Worker.main)"
+  echo "  SKIP Worker not running (start with: DB_PATH=$DB_RESTATE ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Worker.main')"
 else
   sqlite3 "$DB_RESTATE" "CREATE TABLE IF NOT EXISTS content (id TEXT PRIMARY KEY, author_id TEXT NOT NULL, text_content TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL, decision TEXT, decision_reason TEXT, awakeable_id TEXT)" 2>/dev/null || true
   sqlite3 "$DB_RESTATE" "DELETE FROM content WHERE id = '$CID_RESTATE'"
