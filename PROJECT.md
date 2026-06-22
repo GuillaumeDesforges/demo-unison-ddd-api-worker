@@ -134,7 +134,7 @@ demo-unison-ddd-api-worker/
 
 ## Status
 
-**Phase: Stage 2 — Direct interpreter (HTTP API, direct mode) — implementation complete, integration test pending.**
+**Phase: Stage 3 — Restate interpreter (worker, Restate mode) — implementation complete, integration test pending.**
 
 ## Roadmap
 
@@ -156,9 +156,10 @@ demo-unison-ddd-api-worker/
 
 ### Stage 3 — Restate interpreter (worker, Restate mode)
 
-- [ ] Restate `ctx.run` interpreter for `AIClassifier` and `Notifier`
-- [ ] Restate awakeable interpreter for `HumanReview`
-- [ ] `Demo.Worker.main` Restate service endpoint
+- [x] Restate `ctx.run` interpreter for `AIClassifier` and `Notifier`
+- [x] Restate `ctx.run` interpreter for `ContentStore` (saves durable; reads direct)
+- [x] Restate awakeable interpreter for `HumanReview` (creates awakeable, stores ID in SQLite)
+- [x] `Demo.Worker.main` Restate service endpoint (port 9080, `ModerationService/moderate`)
 - [ ] Integration test: submit via HTTP API → worker runs saga durably → poll HTTP API for result
 - [ ] Integration test: human review flow via awakeable
 

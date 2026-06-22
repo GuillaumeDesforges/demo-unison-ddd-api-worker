@@ -2,6 +2,11 @@ use lib.runarorama_sqlite_1_0_1 Sqlite
 use lib.unison_http_16_1_0 HttpRequest HttpResponse Body Version Headers
 use lib.unison_http_16_1_0.server Config Routes Handler
 use lib.unison_json_1_4_2.core Json
+use lib.guillaumedesforges_restate_sdk_unison_main Restate
+use lib.guillaumedesforges_restate_sdk_unison_main.Restate.Ctx ctx
+use lib.guillaumedesforges_restate_sdk_unison_main.Restate AwakeableHandle Input HandlerDef ServiceDef Endpoint
+use lib.guillaumedesforges_restate_sdk_unison_main.Restate.NotifValue NSuccess NFailure NVoid
+use lib.guillaumedesforges_restate_sdk_unison_main.Restate.ServiceKind RsService
 
 -- ============================================================
 -- SQLite row serialization helpers
@@ -52,7 +57,7 @@ ContentStatus.fromRow status decTag decReason = match status with
 
 ContentStore.initDb : Sqlite.DB ->{IO, Exception} ()
 ContentStore.initDb db =
-  Sqlite.DB.execute db "CREATE TABLE IF NOT EXISTS content (id TEXT PRIMARY KEY, author_id TEXT NOT NULL, text_content TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL, decision TEXT, decision_reason TEXT)"
+  Sqlite.DB.execute db "CREATE TABLE IF NOT EXISTS content (id TEXT PRIMARY KEY, author_id TEXT NOT NULL, text_content TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL, decision TEXT, decision_reason TEXT, awakeable_id TEXT)"
 
 ContentStore.sqliteHandler : Sqlite.DB -> '{g, ContentStore} a ->{g, IO, Exception} a
 ContentStore.sqliteHandler db action =
@@ -216,3 +221,114 @@ Demo.Api.main = do
   routes  = routes1 <<< Demo.Api.reviewHandler db
   Threads.run do
     Config.serve routes config
+
+-- ============================================================
+-- Awakeable ID persistence (for Restate mode)
+-- ============================================================
+
+ContentStore.saveAwakeableId : Sqlite.DB -> ContentId -> Text ->{IO, Exception} ()
+ContentStore.saveAwakeableId db cid awakeId =
+  stmt = Sqlite.PreparedStatement.prepare db "UPDATE content SET awakeable_id = ? WHERE id = ?"
+  Sqlite.PreparedStatement.bind stmt 0 (Sqlite.Value.Text awakeId)
+  Sqlite.PreparedStatement.bind stmt 1 (Sqlite.Value.Text (ContentId.unwrap cid))
+  _ = Sqlite.PreparedStatement.step stmt
+  Sqlite.PreparedStatement.finalize stmt
+
+ContentStore.loadAwakeableId : Sqlite.DB -> ContentId ->{IO, Exception} Optional Text
+ContentStore.loadAwakeableId db cid =
+  stmt = Sqlite.PreparedStatement.prepare db "SELECT awakeable_id FROM content WHERE id = ?"
+  Sqlite.PreparedStatement.bind stmt 0 (Sqlite.Value.Text (ContentId.unwrap cid))
+  result = match Sqlite.PreparedStatement.step stmt with
+    Sqlite.StepResult.Done -> None
+    Sqlite.StepResult.Row ->
+      match Sqlite.PreparedStatement.column stmt 0 with
+        Sqlite.Value.Text t -> Some t
+        _ -> None
+  Sqlite.PreparedStatement.finalize stmt
+  result
+
+-- ============================================================
+-- Restate ability interpreters
+-- ============================================================
+
+AIClassifier.restateHandler : '{g, AIClassifier} a ->{g, Restate.Ctx, IO, Exception} a
+AIClassifier.restateHandler action =
+  go = cases
+    { a } -> a
+    { AIClassifier.classify _ -> k } ->
+      bs = ctx.run "classify" do Text.toUtf8 "Approve"
+      decision = ModerationDecision.fromRow (Text.fromUtf8 bs) None
+      handle k decision with go
+  handle action() with go
+
+Notifier.restateHandler : '{g, Notifier} a ->{g, Restate.Ctx, IO, Exception} a
+Notifier.restateHandler action =
+  go = cases
+    { a } -> a
+    { Notifier.notify authorId decision -> k } ->
+      (decTag, _) = ModerationDecision.toRow decision
+      _ = ctx.run "notify" do
+        printLine ("notify: " Text.++ authorId Text.++ " → " Text.++ decTag)
+        Text.toUtf8 ""
+      handle k () with go
+  handle action() with go
+
+ContentStore.restateHandler : Sqlite.DB -> '{g, ContentStore} a ->{g, Restate.Ctx, IO, Exception} a
+ContentStore.restateHandler db action =
+  go = cases
+    { a } -> a
+    { ContentStore.getContent cid -> k } ->
+      content = ContentStore.sqliteGet db cid
+      handle k content with go
+    { ContentStore.saveContent c -> k } ->
+      _ = ctx.run ("save-" Text.++ ContentId.unwrap (Content.id c)) do
+        ContentStore.sqliteSave db c
+        Text.toUtf8 ""
+      handle k () with go
+  handle action() with go
+
+HumanReview.awakeableHandler : Sqlite.DB -> '{g, HumanReview} a ->{g, Restate.Ctx, IO, Exception} a
+HumanReview.awakeableHandler db action =
+  go = cases
+    { a } -> a
+    { HumanReview.waitForDecision cid -> k } ->
+      hdl = ctx.awakeable
+      awakeId = AwakeableHandle.id hdl
+      _ = ctx.run "store-awakeable-id" do
+        ContentStore.saveAwakeableId db cid awakeId
+        Text.toUtf8 ""
+      rawHdl = AwakeableHandle.rawHandle hdl
+      notif = ctx.await rawHdl
+      decision = match notif with
+        NSuccess bs -> ModerationDecision.fromRow (Text.fromUtf8 bs) None
+        _ -> Reject "awakeable failed"
+      handle k decision with go
+  handle action() with go
+
+-- ============================================================
+-- Restate worker entry point
+-- ============================================================
+
+Demo.Worker.moderationHandler : Sqlite.DB -> '{IO, Restate.State, Restate.Ctx, Exception} Bytes
+Demo.Worker.moderationHandler db = do
+  inp = ctx.input
+  cidText = Text.fromUtf8 (Input.inputBytes inp)
+  c = match ContentStore.sqliteGet db (ContentId cidText) with
+    None    -> bug ("Content not found: " Text.++ cidText)
+    Some c' -> c'
+  HumanReview.awakeableHandler db do
+    ContentStore.restateHandler db do
+      Notifier.restateHandler do
+        AIClassifier.restateHandler do
+          moderationSaga c
+  Text.toUtf8 "ok"
+
+Demo.Worker.main : '{IO, Exception} ()
+Demo.Worker.main = do
+  dbPath = getEnv "DB_PATH"
+  db     = Sqlite.DB.open (FilePath dbPath)
+  ContentStore.initDb db
+  hdl = HandlerDef.HandlerDef "moderate" (Demo.Worker.moderationHandler db)
+  svc = ServiceDef.ServiceDef "ModerationService" RsService [hdl]
+  Threads.run do
+    Endpoint.serve 9080 [svc]
