@@ -434,18 +434,65 @@ Demo.Api.reviewHandler db = Handler.Handler cases
 -- Stage 2b: Entry point — Demo.Api.main
 -- ============================================================
 
+-- POST /content in Restate mode: save to SQLite, then fire to Restate ingress
+Demo.Api.restateSubmitHandler : Sqlite.DB -> Text -> Handler {IO, Exception}
+Demo.Api.restateSubmitHandler db restateIngress = Handler.Handler cases
+  req | Routes.post (root Path./ "content") req ->
+    (cid, authorId, txt) = SubmitRequest.decode (bodyText req)
+    now = Optional.getOrElse 0 (Int.toNat (deprecated.systemTimeMicroseconds() / +1000))
+    c = Content cid authorId txt now Submitted
+    ContentStore.sqliteHandler db do ContentStore.saveContent c
+    cidText = ContentId.unwrap cid
+    _ = Threads.run do
+      uri = URI.parse (restateIngress Text.++ "/ModerationService/moderate")
+      rq = HttpRequest.post uri (Body.fromText cidText)
+      rq1 = HttpRequest.addHeader "content-type" "application/octet-stream" rq
+      handle Http.request rq1 with Http.handler
+    HttpResponse.status.set (HttpResponse.Status.Status 202 "Accepted")
+      (jsonOk (Json.object [("id", Json.text cidText)]))
+  _ -> abort
+
+-- POST /content/:id/review in Restate mode: resolve the Restate awakeable
+Demo.Api.restateReviewHandler : Sqlite.DB -> Text -> Handler {IO, Exception}
+Demo.Api.restateReviewHandler db restateIngress = Handler.Handler cases
+  HttpRequest POST _ (URI _ _ (Path ["content", cid, "review"]) _ _) _ bd ->
+    bodyTxt = match bd with Body bs -> Text.fromUtf8 bs
+    decision = ReviewRequest.decode bodyTxt
+    (decTag, _) = ModerationDecision.toRow decision
+    match ContentStore.loadAwakeableId db (ContentId cid) with
+      None -> httpError 409 "Content not pending human review"
+      Some awakeId ->
+        _ = Threads.run do
+          uri = URI.parse (restateIngress Text.++ "/restate/awakeables/" Text.++ awakeId Text.++ "/resolve")
+          rq = HttpRequest.post uri (Body.fromText decTag)
+          rq1 = HttpRequest.addHeader "content-type" "application/octet-stream" rq
+          handle Http.request rq1 with Http.handler
+        jsonOk (Json.object [("id", Json.text cid), ("decision", Json.text decTag)])
+  _ -> abort
+
+-- Entry point: reads RESTATE_INGRESS and API_PORT env vars to select mode/port
 Demo.Api.main : '{IO, Exception} ()
 Demo.Api.main = do
   dbPath = getEnv "DB_PATH"
   db     = Sqlite.DB.open (FilePath dbPath)
   ContentStore.initDb db
-  config = Config.port.set (Port "8080") Config.default
-  routes0 = Routes.default <<< Demo.Api.submitHandler db
-  routes1 = routes0 <<< Demo.Api.getHandler db
-  routes  = routes1 <<< Demo.Api.reviewHandler db
-  Threads.run do
-    Config.serve routes config
-    Promise.read (Promise.new())
+  apiPort = match IO.getEnv.impl "API_PORT" with
+    Right p -> p
+    Left _  -> "8080"
+  config = Config.port.set (Port apiPort) Config.default
+  serve routes =
+    Threads.run do
+      Config.serve routes config
+      Promise.read (Promise.new())
+  match IO.getEnv.impl "RESTATE_INGRESS" with
+    Left _ ->
+      r0 = Routes.default <<< Demo.Api.submitHandler db
+      r1 = r0 <<< Demo.Api.getHandler db
+      serve (r1 <<< Demo.Api.reviewHandler db)
+    Right ingress ->
+      r0 = Routes.default <<< Demo.Api.restateSubmitHandler db ingress
+      r1 = r0 <<< Demo.Api.getHandler db
+      serve (r1 <<< Demo.Api.restateReviewHandler db ingress)
 
 -- ============================================================
 -- Stage 3: Awakeable ID persistence (for Restate mode)

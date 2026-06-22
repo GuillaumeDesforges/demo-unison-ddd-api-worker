@@ -134,7 +134,7 @@ demo-unison-ddd-api-worker/
 
 ## Status
 
-**Phase: Stage 4 — Polish — complete.**
+**Phase: Stage 4 — Polish — complete. Demo fully reproducible.**
 
 ## Roadmap
 
@@ -171,3 +171,10 @@ demo-unison-ddd-api-worker/
   - Uses `Threads.run do handle ... with Http.handler` inside `ctx.run` thunk
 - [x] `scripts/test-integration.sh` covering both modes
 - [x] README with architecture diagram and quick-start
+- [x] Restate-aware HTTP API handlers: `restateSubmitHandler` / `restateReviewHandler`
+  - `Demo.Api.main` reads `RESTATE_INGRESS` env var: unset → direct mode on port 8080,
+    set → Restate mode (POST forwarded to Restate ingress, review resolves awakeable)
+  - `API_PORT` env var selects the listen port (default 8080; use 8081 in Restate mode)
+  - Gives identical HTTP API (`POST /content`, `GET /content/:id`, `POST .../review`)
+    regardless of backend
+- [x] All scripts updated and verified; `test-direct-mode.sh` passes standalone
