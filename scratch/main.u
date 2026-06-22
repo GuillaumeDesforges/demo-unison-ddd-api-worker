@@ -445,6 +445,7 @@ Demo.Api.main = do
   routes  = routes1 <<< Demo.Api.reviewHandler db
   Threads.run do
     Config.serve routes config
+    Promise.read (Promise.new())
 
 -- ============================================================
 -- Stage 3: Awakeable ID persistence (for Restate mode)
@@ -556,6 +557,7 @@ Demo.Worker.main = do
   svc = ServiceDef.ServiceDef "ModerationService" RsService [hdl]
   Threads.run do
     Endpoint.serve 9080 [svc]
+    Promise.read (Promise.new())
 
 -- ============================================================
 -- Stage 4: Claude API classifier (optional — swap in for approveAll)
