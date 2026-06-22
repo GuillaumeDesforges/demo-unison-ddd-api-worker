@@ -1,0 +1,101 @@
+use Map
+
+-- ============================================================
+-- Pure stub handlers for unit testing
+-- ============================================================
+
+ContentStore.runPure : Map ContentId Content -> '{g, ContentStore} a ->{g} (Map ContentId Content, a)
+ContentStore.runPure initialStore action =
+  go store = cases
+    { a } -> (store, a)
+    { ContentStore.getContent cid -> k } ->
+      handle k (Map.lookup cid store) with go store
+    { ContentStore.saveContent c -> k } ->
+      handle k () with go (Map.insert (Content.id c) c store)
+  handle action() with go initialStore
+
+AIClassifier.runPure : ModerationDecision -> '{g, AIClassifier} a ->{g} a
+AIClassifier.runPure decision action =
+  go = cases
+    { a } -> a
+    { AIClassifier.classify _ -> k } ->
+      handle k decision with go
+  handle action() with go
+
+Notifier.runPure : '{g, Notifier} a ->{g} ([(Text, ModerationDecision)], a)
+Notifier.runPure action =
+  go notifs = cases
+    { a } -> (notifs, a)
+    { Notifier.notify authorId decision -> k } ->
+      handle k () with go (notifs :+ (authorId, decision))
+  handle action() with go []
+
+HumanReview.runPure : ModerationDecision -> '{g, HumanReview} a ->{g} a
+HumanReview.runPure decision action =
+  go = cases
+    { a } -> a
+    { HumanReview.waitForDecision _ -> k } ->
+      handle k decision with go
+  handle action() with go
+
+-- Run the saga with all stub interpreters.
+-- Returns the final content store and the list of notifications emitted.
+Saga.runTest :
+  Map ContentId Content ->
+  ModerationDecision ->
+  ModerationDecision ->
+  Content ->
+  (Map ContentId Content, [(Text, ModerationDecision)])
+Saga.runTest initialStore aiDecision humanDecision content =
+  noHumanReview = do HumanReview.runPure humanDecision (do moderationSaga content)
+  noAI          = do AIClassifier.runPure aiDecision noHumanReview
+  (finalStore, (notifs, _)) =
+    ContentStore.runPure initialStore (do Notifier.runPure noAI)
+  (finalStore, notifs)
+
+-- ============================================================
+-- Moderation saga
+-- ============================================================
+
+moderationSaga : Content ->{ContentStore, AIClassifier, Notifier, HumanReview} ()
+moderationSaga content =
+  saveContent (Content.status.set Submitted content)
+  decision = classify (Content.text content)
+  match decision with
+    Escalate _ ->
+      saveContent (Content.status.set (PendingHumanReview decision) content)
+      humanDecision = waitForDecision (Content.id content)
+      saveContent (Content.status.set (Resolved humanDecision) content)
+      notify (Content.authorId content) humanDecision
+    _ ->
+      saveContent (Content.status.set (AutoModerated decision) content)
+      notify (Content.authorId content) decision
+
+-- ============================================================
+-- Tests
+-- ============================================================
+
+test> moderationSaga.tests.approve =
+  content = Content (ContentId "c1") "alice" "hello world" 0 Submitted
+  (store, notifs) = Saga.runTest Map.empty Approve Approve content
+  test.verify do
+    test.ensureEqual (Some (Content.status.set (AutoModerated Approve) content))
+                     (Map.lookup (ContentId "c1") store)
+    test.ensureEqual [("alice", Approve)] notifs
+
+test> moderationSaga.tests.reject =
+  content = Content (ContentId "c2") "bob" "buy cheap pills" 0 Submitted
+  (store, notifs) = Saga.runTest Map.empty (Reject "spam") Approve content
+  test.verify do
+    test.ensureEqual (Some (Content.status.set (AutoModerated (Reject "spam")) content))
+                     (Map.lookup (ContentId "c2") store)
+    test.ensureEqual [("bob", Reject "spam")] notifs
+
+test> moderationSaga.tests.escalate =
+  content = Content (ContentId "c3") "carol" "maybe ok?" 0 Submitted
+  humanDecision = Approve
+  (store, notifs) = Saga.runTest Map.empty (Escalate "uncertain") humanDecision content
+  test.verify do
+    test.ensureEqual (Some (Content.status.set (Resolved Approve) content))
+                     (Map.lookup (ContentId "c3") store)
+    test.ensureEqual [("carol", Approve)] notifs
