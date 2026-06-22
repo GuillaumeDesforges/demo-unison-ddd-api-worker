@@ -1,97 +1,218 @@
+use lib.runarorama_sqlite_1_0_1 Sqlite
+use lib.unison_http_16_1_0 HttpRequest HttpResponse Body Version Headers
+use lib.unison_http_16_1_0.server Config Routes Handler
 use lib.unison_json_1_4_2.core Json
-use lib.unison_json_1_4_2 Decoder
 
 -- ============================================================
--- JSON encoding — domain types → Json for API responses
+-- SQLite row serialization helpers
 -- ============================================================
 
-ModerationDecision.toJson : ModerationDecision -> Json
-ModerationDecision.toJson = cases
-  Approve         -> Json.object [("type", Json.text "Approve")]
-  Reject reason   -> Json.object [("type", Json.text "Reject"), ("reason", Json.text reason)]
-  Escalate reason -> Json.object [("type", Json.text "Escalate"), ("reason", Json.text reason)]
+ModerationDecision.toRow : ModerationDecision -> (Text, Optional Text)
+ModerationDecision.toRow = cases
+  Approve         -> ("Approve",  None)
+  Reject reason   -> ("Reject",   Some reason)
+  Escalate reason -> ("Escalate", Some reason)
 
-ContentStatus.toJson : ContentStatus -> Json
-ContentStatus.toJson = cases
-  Submitted            -> Json.object [("type", Json.text "Submitted")]
-  AutoModerated d      -> Json.object [("type", Json.text "AutoModerated"), ("decision", ModerationDecision.toJson d)]
-  PendingHumanReview d -> Json.object [("type", Json.text "PendingHumanReview"), ("decision", ModerationDecision.toJson d)]
-  Resolved d           -> Json.object [("type", Json.text "Resolved"), ("decision", ModerationDecision.toJson d)]
+ModerationDecision.fromRow : Text -> Optional Text -> ModerationDecision
+ModerationDecision.fromRow tag reason = match tag with
+  "Approve" -> Approve
+  "Reject"  -> Reject (Optional.getOrElse "" reason)
+  _         -> Escalate (Optional.getOrElse "" reason)
 
-ContentId.unwrap : ContentId -> Text
-ContentId.unwrap = cases ContentId t -> t
+ContentStatus.toRow : ContentStatus -> (Text, Optional Text, Optional Text)
+ContentStatus.toRow = cases
+  Submitted ->
+    ("Submitted", None, None)
+  AutoModerated d ->
+    (decTag, decReason) = ModerationDecision.toRow d
+    ("AutoModerated", Some decTag, decReason)
+  PendingHumanReview d ->
+    (decTag, decReason) = ModerationDecision.toRow d
+    ("PendingHumanReview", Some decTag, decReason)
+  Resolved d ->
+    (decTag, decReason) = ModerationDecision.toRow d
+    ("Resolved", Some decTag, decReason)
 
-Content.toJson : Content -> Json
-Content.toJson c =
-  Json.object [
-    ("id",        Json.text (ContentId.unwrap (Content.id c))),
-    ("authorId",  Json.text (Content.authorId c)),
-    ("text",      Json.text (Content.text c)),
-    ("createdAt", Json.nat  (Content.createdAt c)),
-    ("status",    ContentStatus.toJson (Content.status c))
-  ]
-
--- ============================================================
--- JSON decoding — request bodies → domain types
--- ============================================================
-
--- Decodes POST /content body: { "id", "authorId", "text" }
-SubmitRequest.decode : Text ->{Exception} (ContentId, Text, Text)
-SubmitRequest.decode body =
-  decoder = do
-    cid      = Decoder.object.at! "id" Decoder.text
-    authorId = Decoder.object.at! "authorId" Decoder.text
-    txt      = Decoder.object.at! "text" Decoder.text
-    (ContentId cid, authorId, txt)
-  Decoder.run decoder body
-
--- Decodes POST /content/:id/review body: { "decision", "reason"? }
-ReviewRequest.decode : Text ->{Exception} ModerationDecision
-ReviewRequest.decode body =
-  decoder = do
-    decision = Decoder.object.at! "decision" Decoder.text
-    match decision with
-      "Approve" -> Approve
-      "Reject"  ->
-        reason = Decoder.object.at! "reason" Decoder.text
-        Reject reason
-      _ -> Decoder.fail ("Unknown decision: " Text.++ decision)
-  Decoder.run decoder body
+ContentStatus.fromRow : Text -> Optional Text -> Optional Text -> ContentStatus
+ContentStatus.fromRow status decTag decReason = match status with
+  "AutoModerated" ->
+    d = ModerationDecision.fromRow (Optional.getOrElse "Approve" decTag) decReason
+    AutoModerated d
+  "PendingHumanReview" ->
+    d = ModerationDecision.fromRow (Optional.getOrElse "Approve" decTag) decReason
+    PendingHumanReview d
+  "Resolved" ->
+    d = ModerationDecision.fromRow (Optional.getOrElse "Approve" decTag) decReason
+    Resolved d
+  _ -> Submitted
 
 -- ============================================================
--- JSON codec tests
+-- SQLite ContentStore interpreter
 -- ============================================================
 
-test> ModerationDecision.toJson.tests.approve =
-  test.verify do
-    test.ensureEqual
-      (Json.object [("type", Json.text "Approve")])
-      (ModerationDecision.toJson Approve)
+ContentStore.initDb : Sqlite.DB ->{IO, Exception} ()
+ContentStore.initDb db =
+  Sqlite.DB.execute db "CREATE TABLE IF NOT EXISTS content (id TEXT PRIMARY KEY, author_id TEXT NOT NULL, text_content TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL, decision TEXT, decision_reason TEXT)"
 
-test> ModerationDecision.toJson.tests.reject =
-  test.verify do
-    test.ensureEqual
-      (Json.object [("type", Json.text "Reject"), ("reason", Json.text "spam")])
-      (ModerationDecision.toJson (Reject "spam"))
+ContentStore.sqliteHandler : Sqlite.DB -> '{g, ContentStore} a ->{g, IO, Exception} a
+ContentStore.sqliteHandler db action =
+  go = cases
+    { a } -> a
+    { ContentStore.getContent cid -> k } ->
+      handle k (ContentStore.sqliteGet db cid) with go
+    { ContentStore.saveContent c -> k } ->
+      ContentStore.sqliteSave db c
+      handle k () with go
+  handle action() with go
 
-test> ModerationDecision.toJson.tests.escalate =
-  test.verify do
-    test.ensureEqual
-      (Json.object [("type", Json.text "Escalate"), ("reason", Json.text "uncertain")])
-      (ModerationDecision.toJson (Escalate "uncertain"))
+ContentStore.sqliteGet : Sqlite.DB -> ContentId ->{IO, Exception} Optional Content
+ContentStore.sqliteGet db cid =
+  cidText = ContentId.unwrap cid
+  stmt = Sqlite.PreparedStatement.prepare db "SELECT id, author_id, text_content, created_at, status, decision, decision_reason FROM content WHERE id = ?"
+  Sqlite.PreparedStatement.bind stmt 0 (Sqlite.Value.Text cidText)
+  colText i =
+    match Sqlite.PreparedStatement.column stmt i with
+      Sqlite.Value.Text t -> t
+      _ -> ""
+  colTextOpt i =
+    match Sqlite.PreparedStatement.column stmt i with
+      Sqlite.Value.Text t -> Some t
+      _ -> None
+  result = match Sqlite.PreparedStatement.step stmt with
+    Sqlite.StepResult.Done -> None
+    Sqlite.StepResult.Row ->
+      id'       = colText 0
+      authorId  = colText 1
+      txt       = colText 2
+      createdAt =
+        match Sqlite.PreparedStatement.column stmt 3 with
+          Sqlite.Value.Integer i -> Optional.getOrElse 0 (Int.toNat i)
+          _ -> 0
+      status    = colText 4
+      decTag    = colTextOpt 5
+      decReason = colTextOpt 6
+      st = ContentStatus.fromRow status decTag decReason
+      Some (Content (ContentId id') authorId txt createdAt st)
+  Sqlite.PreparedStatement.finalize stmt
+  result
 
-test> SubmitRequest.decode.tests.example =
-  test.verify do
-    body = "{\"id\":\"c1\",\"authorId\":\"alice\",\"text\":\"hello world\"}"
-    test.ensureEqual (ContentId "c1", "alice", "hello world")
-                     (SubmitRequest.decode body)
+ContentStore.sqliteSave : Sqlite.DB -> Content ->{IO, Exception} ()
+ContentStore.sqliteSave db c =
+  (status, decTag, decReason) = ContentStatus.toRow (Content.status c)
+  stmt = Sqlite.PreparedStatement.prepare db "INSERT OR REPLACE INTO content (id, author_id, text_content, created_at, status, decision, decision_reason) VALUES (?, ?, ?, ?, ?, ?, ?)"
+  Sqlite.PreparedStatement.bind stmt 0 (Sqlite.Value.Text (ContentId.unwrap (Content.id c)))
+  Sqlite.PreparedStatement.bind stmt 1 (Sqlite.Value.Text (Content.authorId c))
+  Sqlite.PreparedStatement.bind stmt 2 (Sqlite.Value.Text (Content.text c))
+  Sqlite.PreparedStatement.bind stmt 3 (Sqlite.Value.Integer (Nat.toInt (Content.createdAt c)))
+  Sqlite.PreparedStatement.bind stmt 4 (Sqlite.Value.Text status)
+  optToValue opt =
+    match opt with
+      None   -> Sqlite.Value.Null
+      Some t -> Sqlite.Value.Text t
+  Sqlite.PreparedStatement.bind stmt 5 (optToValue decTag)
+  Sqlite.PreparedStatement.bind stmt 6 (optToValue decReason)
+  _ = Sqlite.PreparedStatement.step stmt
+  Sqlite.PreparedStatement.finalize stmt
 
-test> ReviewRequest.decode.tests.approve =
-  test.verify do
-    test.ensureEqual Approve
-                     (ReviewRequest.decode "{\"decision\":\"Approve\"}")
+-- ============================================================
+-- Stub AIClassifier — always approves (direct mode)
+-- ============================================================
 
-test> ReviewRequest.decode.tests.reject =
-  test.verify do
-    test.ensureEqual (Reject "spam")
-                     (ReviewRequest.decode "{\"decision\":\"Reject\",\"reason\":\"spam\"}")
+AIClassifier.approveAll : '{g, AIClassifier} a ->{g} a
+AIClassifier.approveAll action =
+  go = cases
+    { a } -> a
+    { AIClassifier.classify _ -> k } -> handle k Approve with go
+  handle action() with go
+
+-- ============================================================
+-- Print notifier — logs to stdout (direct mode)
+-- ============================================================
+
+Notifier.printHandler : '{g, Notifier} a ->{g, IO, Exception} a
+Notifier.printHandler action =
+  go = cases
+    { a } -> a
+    { Notifier.notify authorId decision -> k } ->
+      (decTag, _) = ModerationDecision.toRow decision
+      printLine ("notify: " Text.++ authorId Text.++ " → " Text.++ decTag)
+      handle k () with go
+  handle action() with go
+
+-- ============================================================
+-- HTTP helpers
+-- ============================================================
+
+bodyText : HttpRequest ->{Exception} Text
+bodyText req = match HttpRequest.body req with Body bs -> Text.fromUtf8 bs
+
+jsonOk : Json -> HttpResponse
+jsonOk j = HttpResponse.ok (Body.fromText (Json.toText j))
+
+httpError : Nat -> Text -> HttpResponse
+httpError code msg =
+  HttpResponse.status.set (HttpResponse.Status.Status code msg)
+    (HttpResponse.ok (Body.fromText msg))
+
+-- ============================================================
+-- HTTP API handlers
+-- ============================================================
+
+-- POST /content — parse body, run saga inline, return 202
+Demo.Api.submitHandler : Sqlite.DB -> Handler {IO, Exception}
+Demo.Api.submitHandler db = Handler.Handler cases
+  req | Routes.post (root Path./ "content") req ->
+    (cid, authorId, txt) = SubmitRequest.decode (bodyText req)
+    now = Optional.getOrElse 0 (Int.toNat (deprecated.systemTimeMicroseconds() / +1000))
+    c = Content cid authorId txt now Submitted
+    HumanReview.runPure Approve do
+      ContentStore.sqliteHandler db do
+        Notifier.printHandler do
+          AIClassifier.approveAll do
+            moderationSaga c
+    HttpResponse.status.set (HttpResponse.Status.Status 202 "Accepted")
+      (jsonOk (Json.object [("id", Json.text (ContentId.unwrap cid))]))
+  _ -> abort
+
+-- GET /content/:id — look up and return content JSON
+Demo.Api.getHandler : Sqlite.DB -> Handler {IO, Exception}
+Demo.Api.getHandler db = Handler.Handler cases
+  HttpRequest GET _ (URI _ _ (Path ["content", cid]) _ _) _ _ ->
+    match ContentStore.sqliteGet db (ContentId cid) with
+      None   -> HttpResponse.notFound
+      Some c -> jsonOk (Content.toJson c)
+  _ -> abort
+
+-- POST /content/:id/review — direct mode: update DB, notify
+Demo.Api.reviewHandler : Sqlite.DB -> Handler {IO, Exception}
+Demo.Api.reviewHandler db = Handler.Handler cases
+  HttpRequest POST _ (URI _ _ (Path ["content", cid, "review"]) _ _) _ bd ->
+    bodyTxt = match bd with Body bs -> Text.fromUtf8 bs
+    decision = ReviewRequest.decode bodyTxt
+    match ContentStore.sqliteGet db (ContentId cid) with
+      None -> HttpResponse.notFound
+      Some c ->
+        match Content.status c with
+          PendingHumanReview _ ->
+            ContentStore.sqliteSave db (Content.status.set (Resolved decision) c)
+            Notifier.printHandler do
+              Notifier.notify (Content.authorId c) decision
+            jsonOk (Content.toJson (Content.status.set (Resolved decision) c))
+          _ -> httpError 409 "Content is not pending human review"
+  _ -> abort
+
+-- ============================================================
+-- Entry point: Demo.Api.main
+-- ============================================================
+
+Demo.Api.main : '{IO, Exception} ()
+Demo.Api.main = do
+  dbPath = getEnv "DB_PATH"
+  db     = Sqlite.DB.open (FilePath dbPath)
+  ContentStore.initDb db
+  config = Config.port.set (Port "8080") Config.default
+  routes0 = Routes.default <<< Demo.Api.submitHandler db
+  routes1 = routes0 <<< Demo.Api.getHandler db
+  routes  = routes1 <<< Demo.Api.reviewHandler db
+  Threads.run do
+    Config.serve routes config

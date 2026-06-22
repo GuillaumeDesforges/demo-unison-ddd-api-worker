@@ -134,25 +134,25 @@ demo-unison-ddd-api-worker/
 
 ## Status
 
-**Phase: scaffolding — not yet started.**
+**Phase: Stage 2 — Direct interpreter (HTTP API, direct mode) — implementation complete, integration test pending.**
 
 ## Roadmap
 
-### Stage 1 — Domain types and saga (unit tests)
+### Stage 1 — Domain types and saga (unit tests) ✅
 
-- [ ] Define `Content`, `ContentId`, `ContentStatus`, `ModerationDecision`
-- [ ] Define the four abilities
-- [ ] Write `moderationSaga` against the abilities
-- [ ] Unit test the saga with pure stub interpreters (no IO)
+- [x] Define `Content`, `ContentId`, `ContentStatus`, `ModerationDecision`
+- [x] Define the four abilities
+- [x] Write `moderationSaga` against the abilities
+- [x] Unit test the saga with pure stub interpreters (no IO)
 
 ### Stage 2 — Direct interpreter (HTTP API, direct mode)
 
-- [ ] SQLite interpreter for `ContentStore`
-- [ ] Stub interpreter for `AIClassifier`
-- [ ] HTTP webhook interpreter for `Notifier`
-- [ ] Test-double interpreter for `HumanReview`
-- [ ] `Demo.Api.main` HTTP server with all three routes
-- [ ] Integration test: submit → poll → verify `Approved` or `Rejected`
+- [x] SQLite interpreter for `ContentStore`
+- [x] Stub interpreter for `AIClassifier` (`approveAll` — always returns `Approve`)
+- [x] Print-to-stdout interpreter for `Notifier` (`printHandler`)
+- [x] Pure stub interpreter for `HumanReview` (`runPure` — returns fixed decision)
+- [x] `Demo.Api.main` HTTP server with all three routes
+- [ ] Integration test: submit → poll → verify `AutoModerated Approve`
 
 ### Stage 3 — Restate interpreter (worker, Restate mode)
 
