@@ -115,7 +115,7 @@ In direct mode, `waitForDecision` is not reachable in normal flow (the stub clas
 
 ### 7. Single scratch file
 
-All Unison code lives in `scratch/main.u`. UCM codebase at `~/.config/unisonlanguage/` under project `@gdforj/demo-unison-ddd-api-worker`.
+All Unison code lives in `scratch/main.u`. UCM codebase at `~/.config/unisonlanguage/` under project `@guillaumedesforges/demo-unison-ddd-api-worker`.
 
 ## Project structure
 

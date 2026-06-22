@@ -92,7 +92,7 @@ cargo build --release \
 nix-shell   # sets SQLITE_LIB_PATH for you
 
 export DB_PATH=$(mktemp /tmp/mod-XXXXXX.db)
-ucm run '@gdforj/demo-unison-ddd-api-worker/main:.Demo.Api.main' &
+ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Api.main' &
 
 # Submit content
 curl -X POST http://localhost:8080/content \
@@ -114,7 +114,7 @@ restate-server --base-dir $(mktemp -d)
 **Terminal 2 — Restate worker:**
 ```bash
 export DB_PATH=/tmp/mod-restate.db
-ucm run '@gdforj/demo-unison-ddd-api-worker/main:.Demo.Worker.main'
+ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Worker.main'
 ```
 
 **Terminal 3 — register and test:**
