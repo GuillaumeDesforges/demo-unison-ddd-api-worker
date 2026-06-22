@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Integration test for Restate mode.
 #
-# Prerequisites (run before this script):
+# Prerequisites (run before this script, all inside nix-shell):
 #   Terminal 1: restate-server --base-dir $(mktemp -d)
-#   Terminal 2: DB_PATH=/tmp/test.db ucm run Demo.Worker.main
+#   Terminal 2: DB_PATH=/tmp/test.db ucm run '@gdforj/demo-unison-ddd-api-worker/main:.Demo.Worker.main'
 #
 # This script:
 #   1. Creates the SQLite schema and inserts a test content row

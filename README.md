@@ -76,13 +76,23 @@ type ModerationDecision
 
 ## Quick Start
 
-All tools come from `shell.nix`. Work inside `nix-shell`.
+All tools come from `shell.nix`. Always work inside `nix-shell` — it sets
+`SQLITE_LIB_PATH` and `LD_LIBRARY_PATH` automatically.
+
+The Restate SDK requires a native Rust library. Build it once:
+
+```bash
+cargo build --release \
+  --manifest-path ../restatedev-sdk-unison/crates/restate-sdk-unison-native/Cargo.toml
+```
 
 ### Direct mode (single terminal)
 
 ```bash
+nix-shell   # sets SQLITE_LIB_PATH for you
+
 export DB_PATH=$(mktemp /tmp/mod-XXXXXX.db)
-ucm run Demo.Api.main &
+ucm run '@gdforj/demo-unison-ddd-api-worker/main:.Demo.Api.main' &
 
 # Submit content
 curl -X POST http://localhost:8080/content \
@@ -91,10 +101,10 @@ curl -X POST http://localhost:8080/content \
 
 # Poll result
 curl http://localhost:8080/content/abc-123
-# → {"id":"abc-123","status":"AutoModerated","decision":{"type":"Approve"}}
+# → {"id":"abc-123","status":{"type":"AutoModerated"},"decision":{"type":"Approve"}, ...}
 ```
 
-### Restate mode (three terminals)
+### Restate mode (three terminals, all inside `nix-shell`)
 
 **Terminal 1 — Restate server:**
 ```bash
@@ -104,14 +114,14 @@ restate-server --base-dir $(mktemp -d)
 **Terminal 2 — Restate worker:**
 ```bash
 export DB_PATH=/tmp/mod-restate.db
-ucm run Demo.Worker.main
+ucm run '@gdforj/demo-unison-ddd-api-worker/main:.Demo.Worker.main'
 ```
 
 **Terminal 3 — register and test:**
 ```bash
 export DB_PATH=/tmp/mod-restate.db
 
-# Register worker
+# Register worker with Restate (once per worker start)
 curl -X POST http://localhost:9070/deployments \
   -H 'content-type: application/json' \
   -d '{"uri":"http://localhost:9080","use_http_11":true}'
@@ -120,7 +130,7 @@ curl -X POST http://localhost:9070/deployments \
 sqlite3 $DB_PATH "CREATE TABLE IF NOT EXISTS content (id TEXT PRIMARY KEY, author_id TEXT NOT NULL, text_content TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL, decision TEXT, decision_reason TEXT, awakeable_id TEXT)"
 sqlite3 $DB_PATH "INSERT INTO content VALUES ('abc-123','alice','Hello world',1234567890,'Submitted',NULL,NULL,NULL)"
 
-# Invoke via Restate
+# Invoke via Restate ingress
 curl -X POST http://localhost:8080/ModerationService/moderate \
   -H 'content-type: application/octet-stream' \
   --data-raw 'abc-123'
@@ -135,16 +145,16 @@ sqlite3 $DB_PATH "SELECT status, decision FROM content WHERE id='abc-123'"
 If the AI escalates (change the classifier stub to return `Escalate`):
 
 ```bash
-# Awaiting human review — get the awakeable ID
+# Get the awakeable ID Restate suspended on
 AWAKE_ID=$(sqlite3 $DB_PATH "SELECT awakeable_id FROM content WHERE id='abc-123'")
 
-# Complete the awakeable (approve)
+# Deliver the human decision — worker resumes
 curl -X POST "http://localhost:8080/restate/awakeables/$AWAKE_ID/resolve" \
   -H 'content-type: application/octet-stream' \
   --data-raw 'Approve'
 
-# Worker resumes → Resolved Approve
 sqlite3 $DB_PATH "SELECT status, decision FROM content WHERE id='abc-123'"
+# → Resolved|Approve
 ```
 
 ## Running Tests
