@@ -28,7 +28,7 @@ func handleSubmit(w http.ResponseWriter, r *http.Request) {
     context := streamGatherContext(w, input)
     output := streamGenerateOutput(w, context)
     score := streamScoreOutput(w, output)
-    streamSave(w, content, output, score)
+    streamSave(w, context, output, score)
 }
 
 // Temporal workflow version
@@ -36,7 +36,7 @@ func Submit(ctx workflow.Context, input SubmitInput) error {
     context := workflow.ExecuteActivity(ctx, GatherContext, input)
     output := workflow.ExecuteActivity(ctx, GenerateOutput, context)
     score := workflow.ExecuteActivity(ctx, ScoreOutput, output)
-    workflow.ExecuteActivity(ctx, ScoreOutput, output)
+    workflow.ExecuteActivity(ctx, Save, NewScoreInput(context, output, score))
 }
 ```
 
@@ -44,6 +44,15 @@ Two source of truths to what "submit" means in our business logic.
 Yikes.
 
 Our first idea was to use interfaces to inject handlers that wrap with the right functions, but in the case of Go and Temporal that led to a rabbit-hole of problems. 
+
+In order to make application services registerable and runnable as Temporal Workflows in a Go Temporal worker:
+- to register business logic functions as workflows, we'd need to register them as wrapped functions to accept the first `ctx temporal.WorkflowContext`
+- to register methods of dependencies as activities, we'd need to register them all
+- for both workflows and activities, Temporal registers them as a flat list, so we must make sure there is no naming collision of methods across dependencies
+- meanwhile the dependencies injected in the business functions used as workflows should be structs that re-declare methods with a boilerplate ExecuteActivity call each
+- at this point, you don't even call other business logic functions as child workflows, which may or may not match your needs
+
+This makes a lot of effort that is error-prone at scale and can't be linted statically.
 
 ## Algebraic effects are not that scary
 
@@ -90,13 +99,18 @@ Logger.printHandler do greet "Alice"        -- prints "Hello, Alice"
 (logs, _) = Logger.collectHandler do greet "Alice"  -- logs = ["Hello, Alice"]
 ```
 
+The two branches of `go` cover the two states the computation can be in.
+`{ a }` matches when it's finished (`a` is the final result).
+`{ log msg -> k }` intercepts a call to `log` mid-computation: `msg` is the argument, and `k` is a suspend-and-resume handle (everything that comes _after_ the `log` call, waiting to be picked back up).
+The handler does its work (prints, or appends to a list), then resumes by calling `handle k () with go`, handing `()` back as `log`'s return value.
+
 These "abilities" are Unison's implementation of _algebraic effects_, which is the abstraction that allows us to write some logic once and decide how it should run later.
 
 ## Let's get our hands dirty
 
 A quick note before we go further: this demo uses [Restate](https://restate.dev/) rather than Temporal because Restate's surface is simpler, which made it feasible to build a Unison SDK for it, while Temporal's surface would have been considerably larger.
 
-The demo uses a content moderation queue: users submit text posts, an AI classifier makes a moderation decision, and the author is notified of the outcome. Uncertain content is escalated to a human reviewer via a separate endpoint.
+The demo uses a content moderation queue: users submit text posts, an AI classifier makes a moderation decision, and the author is notified of the outcome. Uncertain content is escalated to a human reviewer via a separate endpoint. The full source is available at [github.com/GuillaumeDesforges/demo-unison-ddd-api-worker](https://github.com/GuillaumeDesforges/demo-unison-ddd-api-worker).
 
 Three abilities cover everything the saga needs:
 
@@ -158,14 +172,17 @@ ContentStore.restateHandler db do
       moderationSaga content
 ```
 
-Same function, zero changes. `moderationSaga` doesn't know whether it's running inline or inside a Temporal-style durable workflow.
+**Same function. Zero changes.**
+
+`moderationSaga` doesn't know whether it's running inline or inside a Temporal-style durable workflow.
 `ContentStore.sqliteHandler` runs a plain SQLite query.
 `ContentStore.restateHandler` wraps the same query in `ctx.run`, which journals it so Restate can replay it deterministically on retry.
 The infrastructure lives entirely outside of the business logic, in the abilities' handlers.
 
 This also makes testing straightforward.
 You don't need a running server, a database, or a Restate instance.
-Just like one may inject stub dependencies, we can stack pure stub handlers:
+Just like one may inject stub dependencies, we can stack pure stub handlers.
+Each ability has a pure in-memory counterpart: `AIClassifier.runPure` returns a fixed decision, `Notifier.runPure` collects notifications into a list, and `ContentStore.runPure` works against an in-memory map.
 
 ```unison
 Saga.runTest initialStore aiDecision content =
@@ -202,5 +219,12 @@ test> moderationSaga.tests.escalate =
 The insight here is not specific to Unison or Restate.
 It's that *effects are a design tool*, not just a runtime concept.
 
-When you treat your business logic's dependencies as declared effects rather than injected values, the abstraction boundary becomes meaningful in a new way, with improved separation of concerns, backed by the type system.
-Instead of thinking about software as infrastructure and providers accidentally piled up, we can shift to thinking about bricks of business logic that can be composed.
+With dependency injection, you can swap implementations, but the business logic is still coupled to whatever interface its runner expects.
+In the Go/Temporal example, `Submit` could never run in HTTP mode without being rewritten: its structure is baked into the Workflow/Activity pattern.
+
+Effects break that coupling.
+`moderationSaga` is a pure description of what needs to happen, with no opinion about how.
+You can compose it with other sagas, lift it into a test, or change its entire execution model, just by swapping the outermost handlers.
+The unit of reuse is the business logic itself.
+
+That's composability you simply can't quite get from dependency injection.
