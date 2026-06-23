@@ -11,7 +11,7 @@ use lib.guillaumedesforges_restate_sdk_unison_main.Restate.NotifValue NSuccess N
 use lib.guillaumedesforges_restate_sdk_unison_main.Restate.ServiceKind RsService
 
 -- ============================================================
--- Stage 1: Domain types
+-- Domain types
 -- ============================================================
 
 type ContentId = ContentId Text
@@ -29,8 +29,11 @@ type ModerationDecision
   | Reject Text
   | Escalate Text
 
+ContentId.unwrap : ContentId -> Text
+ContentId.unwrap = cases ContentId t -> t
+
 -- ============================================================
--- Stage 1: Abilities
+-- Abilities — abstract effects the saga depends on
 -- ============================================================
 
 ability ContentStore where
@@ -47,7 +50,7 @@ ability HumanReview where
   waitForDecision : ContentId ->{HumanReview} ModerationDecision
 
 -- ============================================================
--- Stage 1: Core saga — written once, runs under any interpreter
+-- Moderation saga — written once, runs under any interpreter
 -- ============================================================
 
 moderationSaga : Content ->{HumanReview, AIClassifier, Notifier, ContentStore} ()
@@ -66,84 +69,8 @@ moderationSaga content =
       notify (Content.authorId content) decision
 
 -- ============================================================
--- Stage 1: Pure stub interpreters (for testing, no IO)
+-- Serialization — JSON and SQLite row codecs
 -- ============================================================
-
-AIClassifier.runPure : ModerationDecision -> '{g, AIClassifier} a ->{g} a
-AIClassifier.runPure decision action =
-  go = cases
-    { a }                            -> a
-    { AIClassifier.classify _ -> k } -> handle k decision with go
-  handle action() with go
-
-ContentStore.runPure : Map ContentId Content -> '{g, ContentStore} a ->{g} (Map ContentId Content, a)
-ContentStore.runPure initialStore action =
-  go store = cases
-    { a }                   -> (store, a)
-    { getContent cid -> k } -> handle k (Map.get cid store) with go store
-    { saveContent c -> k }  -> handle k() with go (Map.insert (Content.id c) c store)
-  handle action() with go initialStore
-
-Notifier.runPure : '{g, Notifier} a ->{g} ([(Text, ModerationDecision)], a)
-Notifier.runPure action =
-  use List :+
-  go notifs = cases
-    { a }                             -> (notifs, a)
-    { notify authorId decision -> k } -> handle k() with go (notifs :+ (authorId, decision))
-  handle action() with go []
-
-HumanReview.runPure : ModerationDecision -> '{g, HumanReview} a ->{g} a
-HumanReview.runPure decision action =
-  go = cases
-    { a }                      -> a
-    { waitForDecision _ -> k } -> handle k decision with go
-  handle action() with go
-
-Saga.runTest : Map ContentId Content -> ModerationDecision -> ModerationDecision -> Content -> (Map ContentId Content, [(Text, ModerationDecision)])
-Saga.runTest initialStore aiDecision humanDecision content =
-  noHumanReview = do HumanReview.runPure humanDecision do moderationSaga content
-  noAI = do AIClassifier.runPure aiDecision noHumanReview
-  (finalStore, (notifs, _)) = ContentStore.runPure initialStore do Notifier.runPure noAI
-  (finalStore, notifs)
-
--- ============================================================
--- Stage 1: Unit tests — red/green for the saga
--- ============================================================
-
-moderationSaga.tests.approve : [Result]
-moderationSaga.tests.approve =
-  use test ensureEqual
-  content = Content (ContentId "c1") "alice" "hello world" 0 Submitted
-  (store, notifs) = Saga.runTest Map.empty Approve Approve content
-  test.verify do
-    ensureEqual (Some (Content.status.set (AutoModerated Approve) content)) (Map.get (ContentId "c1") store)
-    ensureEqual [("alice", Approve)] notifs
-
-moderationSaga.tests.reject : [Result]
-moderationSaga.tests.reject =
-  use test ensureEqual
-  content = Content (ContentId "c2") "bob" "buy cheap pills" 0 Submitted
-  (store, notifs) = Saga.runTest Map.empty (Reject "spam") Approve content
-  test.verify do
-    ensureEqual (Some (Content.status.set (AutoModerated (Reject "spam")) content)) (Map.get (ContentId "c2") store)
-    ensureEqual [("bob", Reject "spam")] notifs
-
-moderationSaga.tests.escalate : [Result]
-moderationSaga.tests.escalate =
-  use test ensureEqual
-  content = Content (ContentId "c3") "carol" "maybe ok?" 0 Submitted
-  humanDecision = Approve
-  (store, notifs) = Saga.runTest Map.empty (Escalate "uncertain") humanDecision content
-  test.verify do
-    ensureEqual (Some (Content.status.set (Resolved Approve) content)) (Map.get (ContentId "c3") store)
-    ensureEqual [("carol", Approve)] notifs
-
--- ============================================================
--- Stage 2a: JSON codecs
--- ============================================================
-
-ContentId.unwrap : ContentId -> Text
-ContentId.unwrap = cases ContentId t -> t
 
 ModerationDecision.toJson : ModerationDecision -> Json
 ModerationDecision.toJson = cases
@@ -194,48 +121,6 @@ ReviewRequest.decode body =
       _         -> Decoder.fail ("Unknown decision: " ++ decision)
   Decoder.run decoder body
 
--- ============================================================
--- Stage 2a: JSON codec tests
--- ============================================================
-
-ModerationDecision.toJson.tests.approve : [Result]
-ModerationDecision.toJson.tests.approve =
-  test.verify do
-    test.ensureEqual (Json.object [("type", Json.text "Approve")]) (ModerationDecision.toJson Approve)
-
-ModerationDecision.toJson.tests.reject : [Result]
-ModerationDecision.toJson.tests.reject =
-  test.verify do
-    test.ensureEqual
-      (Json.object [("type", Json.text "Reject"), ("reason", Json.text "spam")])
-      (ModerationDecision.toJson (Reject "spam"))
-
-ModerationDecision.toJson.tests.escalate : [Result]
-ModerationDecision.toJson.tests.escalate =
-  test.verify do
-    test.ensureEqual
-      (Json.object [("type", Json.text "Escalate"), ("reason", Json.text "uncertain")])
-      (ModerationDecision.toJson (Escalate "uncertain"))
-
-ReviewRequest.decode.tests.approve : [Result]
-ReviewRequest.decode.tests.approve =
-  test.verify do
-    test.ensureEqual Approve (ReviewRequest.decode "{\"decision\":\"Approve\"}")
-
-ReviewRequest.decode.tests.reject : [Result]
-ReviewRequest.decode.tests.reject =
-  test.verify do
-    test.ensureEqual (Reject "spam") (ReviewRequest.decode "{\"decision\":\"Reject\",\"reason\":\"spam\"}")
-
-SubmitRequest.decode.tests.example : [Result]
-SubmitRequest.decode.tests.example = test.verify do
-  body = "{\"id\":\"c1\",\"authorId\":\"alice\",\"text\":\"hello world\"}"
-  test.ensureEqual (ContentId "c1", "alice", "hello world") (SubmitRequest.decode body)
-
--- ============================================================
--- Stage 2b: SQLite row serialization helpers
--- ============================================================
-
 ModerationDecision.toRow : ModerationDecision -> (Text, Optional Text)
 ModerationDecision.toRow = cases
   Approve         -> ("Approve",  None)
@@ -276,23 +161,53 @@ ContentStatus.fromRow status decTag decReason = match status with
   _ -> Submitted
 
 -- ============================================================
--- Stage 2b: SQLite ContentStore interpreter
+-- Pure stub interpreters — for testing, no IO
+-- ============================================================
+
+AIClassifier.runPure : ModerationDecision -> '{g, AIClassifier} a ->{g} a
+AIClassifier.runPure decision action =
+  go = cases
+    { a }                            -> a
+    { AIClassifier.classify _ -> k } -> handle k decision with go
+  handle action() with go
+
+ContentStore.runPure : Map ContentId Content -> '{g, ContentStore} a ->{g} (Map ContentId Content, a)
+ContentStore.runPure initialStore action =
+  go store = cases
+    { a }                   -> (store, a)
+    { getContent cid -> k } -> handle k (Map.get cid store) with go store
+    { saveContent c -> k }  -> handle k() with go (Map.insert (Content.id c) c store)
+  handle action() with go initialStore
+
+Notifier.runPure : '{g, Notifier} a ->{g} ([(Text, ModerationDecision)], a)
+Notifier.runPure action =
+  use List :+
+  go notifs = cases
+    { a }                             -> (notifs, a)
+    { notify authorId decision -> k } -> handle k() with go (notifs :+ (authorId, decision))
+  handle action() with go []
+
+HumanReview.runPure : ModerationDecision -> '{g, HumanReview} a ->{g} a
+HumanReview.runPure decision action =
+  go = cases
+    { a }                      -> a
+    { waitForDecision _ -> k } -> handle k decision with go
+  handle action() with go
+
+Saga.runTest : Map ContentId Content -> ModerationDecision -> ModerationDecision -> Content -> (Map ContentId Content, [(Text, ModerationDecision)])
+Saga.runTest initialStore aiDecision humanDecision content =
+  noHumanReview = do HumanReview.runPure humanDecision do moderationSaga content
+  noAI = do AIClassifier.runPure aiDecision noHumanReview
+  (finalStore, (notifs, _)) = ContentStore.runPure initialStore do Notifier.runPure noAI
+  (finalStore, notifs)
+
+-- ============================================================
+-- SQLite ContentStore interpreter
 -- ============================================================
 
 ContentStore.initDb : Sqlite.DB ->{IO, Exception} ()
 ContentStore.initDb db =
   Sqlite.DB.execute db "CREATE TABLE IF NOT EXISTS content (id TEXT PRIMARY KEY, author_id TEXT NOT NULL, text_content TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL, decision TEXT, decision_reason TEXT, awakeable_id TEXT)"
-
-ContentStore.sqliteHandler : Sqlite.DB -> '{g, ContentStore} a ->{g, IO, Exception} a
-ContentStore.sqliteHandler db action =
-  go = cases
-    { a } -> a
-    { ContentStore.getContent cid -> k } ->
-      handle k (ContentStore.sqliteGet db cid) with go
-    { ContentStore.saveContent c -> k } ->
-      ContentStore.sqliteSave db c
-      handle k () with go
-  handle action() with go
 
 ContentStore.sqliteGet : Sqlite.DB -> ContentId ->{IO, Exception} Optional Content
 ContentStore.sqliteGet db cid =
@@ -343,161 +258,6 @@ ContentStore.sqliteSave db c =
   _ = Sqlite.PreparedStatement.step stmt
   Sqlite.PreparedStatement.finalize stmt
 
--- ============================================================
--- Stage 2b: Stub AIClassifier — always approves (direct mode)
--- ============================================================
-
-AIClassifier.approveAll : '{g, AIClassifier} a ->{g} a
-AIClassifier.approveAll action =
-  go = cases
-    { a } -> a
-    { AIClassifier.classify _ -> k } -> handle k Approve with go
-  handle action() with go
-
--- ============================================================
--- Stage 2b: Print notifier — logs to stdout (direct mode)
--- ============================================================
-
-Notifier.printHandler : '{g, Notifier} a ->{g, IO, Exception} a
-Notifier.printHandler action =
-  go = cases
-    { a } -> a
-    { Notifier.notify authorId decision -> k } ->
-      (decTag, _) = ModerationDecision.toRow decision
-      printLine ("notify: " Text.++ authorId Text.++ " → " Text.++ decTag)
-      handle k () with go
-  handle action() with go
-
--- ============================================================
--- Stage 2b: HTTP helpers
--- ============================================================
-
-bodyText : HttpRequest ->{Exception} Text
-bodyText req = match HttpRequest.body req with Body bs -> Text.fromUtf8 bs
-
-jsonOk : Json -> HttpResponse
-jsonOk j = HttpResponse.ok (Body.fromText (Json.toText j))
-
-httpError : Nat -> Text -> HttpResponse
-httpError code msg =
-  HttpResponse.status.set (HttpResponse.Status.Status code msg)
-    (HttpResponse.ok (Body.fromText msg))
-
--- ============================================================
--- Stage 2b: HTTP API handlers
--- ============================================================
-
--- POST /content — parse body, run saga inline, return 202
-Demo.Api.submitHandler : Sqlite.DB -> Handler {IO, Exception}
-Demo.Api.submitHandler db = Handler.Handler cases
-  req | Routes.post (root Path./ "content") req ->
-    (cid, authorId, txt) = SubmitRequest.decode (bodyText req)
-    now = Optional.getOrElse 0 (Int.toNat (deprecated.systemTimeMicroseconds() / +1000))
-    c = Content cid authorId txt now Submitted
-    HumanReview.runPure Approve do
-      ContentStore.sqliteHandler db do
-        Notifier.printHandler do
-          AIClassifier.approveAll do
-            moderationSaga c
-    HttpResponse.status.set (HttpResponse.Status.Status 202 "Accepted")
-      (jsonOk (Json.object [("id", Json.text (ContentId.unwrap cid))]))
-  _ -> abort
-
--- GET /content/:id — look up and return content JSON
-Demo.Api.getHandler : Sqlite.DB -> Handler {IO, Exception}
-Demo.Api.getHandler db = Handler.Handler cases
-  HttpRequest GET _ (URI _ _ (Path ["content", cid]) _ _) _ _ ->
-    match ContentStore.sqliteGet db (ContentId cid) with
-      None   -> HttpResponse.notFound
-      Some c -> jsonOk (Content.toJson c)
-  _ -> abort
-
--- POST /content/:id/review — direct mode: update DB, notify
-Demo.Api.reviewHandler : Sqlite.DB -> Handler {IO, Exception}
-Demo.Api.reviewHandler db = Handler.Handler cases
-  HttpRequest POST _ (URI _ _ (Path ["content", cid, "review"]) _ _) _ bd ->
-    bodyTxt = match bd with Body bs -> Text.fromUtf8 bs
-    decision = ReviewRequest.decode bodyTxt
-    match ContentStore.sqliteGet db (ContentId cid) with
-      None -> HttpResponse.notFound
-      Some c ->
-        match Content.status c with
-          PendingHumanReview _ ->
-            ContentStore.sqliteSave db (Content.status.set (Resolved decision) c)
-            Notifier.printHandler do
-              Notifier.notify (Content.authorId c) decision
-            jsonOk (Content.toJson (Content.status.set (Resolved decision) c))
-          _ -> httpError 409 "Content is not pending human review"
-  _ -> abort
-
--- ============================================================
--- Stage 2b: Entry point — Demo.Api.main
--- ============================================================
-
--- POST /content in Restate mode: save to SQLite, then fire to Restate ingress
-Demo.Api.restateSubmitHandler : Sqlite.DB -> Text -> Handler {IO, Exception}
-Demo.Api.restateSubmitHandler db restateIngress = Handler.Handler cases
-  req | Routes.post (root Path./ "content") req ->
-    (cid, authorId, txt) = SubmitRequest.decode (bodyText req)
-    now = Optional.getOrElse 0 (Int.toNat (deprecated.systemTimeMicroseconds() / +1000))
-    c = Content cid authorId txt now Submitted
-    ContentStore.sqliteHandler db do ContentStore.saveContent c
-    cidText = ContentId.unwrap cid
-    _ = Threads.run do
-      uri = URI.parse (restateIngress Text.++ "/ModerationService/moderate")
-      rq = HttpRequest.post uri (Body.fromText cidText)
-      rq1 = HttpRequest.addHeader "content-type" "application/octet-stream" rq
-      handle Http.request rq1 with Http.handler
-    HttpResponse.status.set (HttpResponse.Status.Status 202 "Accepted")
-      (jsonOk (Json.object [("id", Json.text cidText)]))
-  _ -> abort
-
--- POST /content/:id/review in Restate mode: resolve the Restate awakeable
-Demo.Api.restateReviewHandler : Sqlite.DB -> Text -> Handler {IO, Exception}
-Demo.Api.restateReviewHandler db restateIngress = Handler.Handler cases
-  HttpRequest POST _ (URI _ _ (Path ["content", cid, "review"]) _ _) _ bd ->
-    bodyTxt = match bd with Body bs -> Text.fromUtf8 bs
-    decision = ReviewRequest.decode bodyTxt
-    (decTag, _) = ModerationDecision.toRow decision
-    match ContentStore.loadAwakeableId db (ContentId cid) with
-      None -> httpError 409 "Content not pending human review"
-      Some awakeId ->
-        _ = Threads.run do
-          uri = URI.parse (restateIngress Text.++ "/restate/awakeables/" Text.++ awakeId Text.++ "/resolve")
-          rq = HttpRequest.post uri (Body.fromText decTag)
-          rq1 = HttpRequest.addHeader "content-type" "application/octet-stream" rq
-          handle Http.request rq1 with Http.handler
-        jsonOk (Json.object [("id", Json.text cid), ("decision", Json.text decTag)])
-  _ -> abort
-
--- Entry point: reads RESTATE_INGRESS and API_PORT env vars to select mode/port
-Demo.Api.main : '{IO, Exception} ()
-Demo.Api.main = do
-  dbPath = getEnv "DB_PATH"
-  db     = Sqlite.DB.open (FilePath dbPath)
-  ContentStore.initDb db
-  apiPort = match IO.getEnv.impl "API_PORT" with
-    Right p -> p
-    Left _  -> "8080"
-  config = Config.port.set (Port apiPort) Config.default
-  serve routes =
-    Threads.run do
-      Config.serve routes config
-      Promise.read (Promise.new())
-  match IO.getEnv.impl "RESTATE_INGRESS" with
-    Left _ ->
-      r0 = Routes.default <<< Demo.Api.submitHandler db
-      r1 = r0 <<< Demo.Api.getHandler db
-      serve (r1 <<< Demo.Api.reviewHandler db)
-    Right ingress ->
-      r0 = Routes.default <<< Demo.Api.restateSubmitHandler db ingress
-      r1 = r0 <<< Demo.Api.getHandler db
-      serve (r1 <<< Demo.Api.restateReviewHandler db ingress)
-
--- ============================================================
--- Stage 3: Awakeable ID persistence (for Restate mode)
--- ============================================================
-
 ContentStore.saveAwakeableId : Sqlite.DB -> ContentId -> Text ->{IO, Exception} ()
 ContentStore.saveAwakeableId db cid awakeId =
   stmt = Sqlite.PreparedStatement.prepare db "UPDATE content SET awakeable_id = ? WHERE id = ?"
@@ -519,8 +279,40 @@ ContentStore.loadAwakeableId db cid =
   Sqlite.PreparedStatement.finalize stmt
   result
 
+ContentStore.sqliteHandler : Sqlite.DB -> '{g, ContentStore} a ->{g, IO, Exception} a
+ContentStore.sqliteHandler db action =
+  go = cases
+    { a } -> a
+    { ContentStore.getContent cid -> k } ->
+      handle k (ContentStore.sqliteGet db cid) with go
+    { ContentStore.saveContent c -> k } ->
+      ContentStore.sqliteSave db c
+      handle k () with go
+  handle action() with go
+
 -- ============================================================
--- Stage 3: Restate ability interpreters
+-- Direct-mode interpreters
+-- ============================================================
+
+AIClassifier.approveAll : '{g, AIClassifier} a ->{g} a
+AIClassifier.approveAll action =
+  go = cases
+    { a } -> a
+    { AIClassifier.classify _ -> k } -> handle k Approve with go
+  handle action() with go
+
+Notifier.printHandler : '{g, Notifier} a ->{g, IO, Exception} a
+Notifier.printHandler action =
+  go = cases
+    { a } -> a
+    { Notifier.notify authorId decision -> k } ->
+      (decTag, _) = ModerationDecision.toRow decision
+      printLine ("notify: " Text.++ authorId Text.++ " → " Text.++ decTag)
+      handle k () with go
+  handle action() with go
+
+-- ============================================================
+-- Restate interpreters — durable, journaled execution
 -- ============================================================
 
 AIClassifier.restateHandler : '{g, AIClassifier} a ->{g, Restate.Ctx, IO, Exception} a
@@ -578,8 +370,185 @@ HumanReview.awakeableHandler db action =
   handle action() with go
 
 -- ============================================================
--- Stage 3: Restate worker entry point
+-- Optional: Claude API classifier (swap in for approveAll)
 -- ============================================================
+
+AIClassifier.callClaude : Text -> Text ->{Exception, Http} Text
+AIClassifier.callClaude apiKey text =
+  uri = URI.parse "https://api.anthropic.com/v1/messages"
+  msg  = Json.object [("role", Json.text "user"), ("content", Json.text ("Classify this content for moderation. Reply with ONE word only: Approve, Reject, or Escalate.\nContent: " Text.++ text))]
+  body = Json.object [("model", Json.text "claude-haiku-4-5-20251001"), ("max_tokens", Json.Number "10"), ("messages", Json.array [msg])]
+  req0 = HttpRequest.post uri (Body.fromText (Json.toText body))
+  req1 = HttpRequest.addHeader "content-type" "application/json" req0
+  req2 = HttpRequest.addHeader "anthropic-version" "2023-06-01" req1
+  req  = HttpRequest.addHeader "x-api-key" apiKey req2
+  resp = Http.request req
+  respBody = HttpResponse.bodyText resp
+  decoder = do
+    Decoder.object.at! "content" do
+      Decoder.array.at! 0 do
+        Decoder.object.at! "text" Decoder.text
+  Decoder.run decoder respBody
+
+AIClassifier.parseDecisionText : Text -> ModerationDecision
+AIClassifier.parseDecisionText t =
+  if Text.startsWith "Approve" t then Approve
+  else if Text.startsWith "Reject" t then Reject t
+  else Escalate t
+
+AIClassifier.claudeDirectHandler : Text -> '{g, AIClassifier} a ->{g, IO, Exception} a
+AIClassifier.claudeDirectHandler apiKey action =
+  go = cases
+    { a } -> a
+    { AIClassifier.classify text -> k } ->
+      decision = Threads.run do
+        decText = handle (AIClassifier.callClaude apiKey text) with Http.handler
+        AIClassifier.parseDecisionText decText
+      handle k decision with go
+  handle action() with go
+
+AIClassifier.claudeRestateHandler : Text -> '{g, AIClassifier} a ->{g, Restate.Ctx, IO, Exception} a
+AIClassifier.claudeRestateHandler apiKey action =
+  go = cases
+    { a } -> a
+    { AIClassifier.classify text -> k } ->
+      bs = ctx.run "classify" do
+        decText = Threads.run do
+          handle (AIClassifier.callClaude apiKey text) with Http.handler
+        (tag, _) = ModerationDecision.toRow (AIClassifier.parseDecisionText decText)
+        Text.toUtf8 tag
+      decision = ModerationDecision.fromRow (Text.fromUtf8 bs) None
+      handle k decision with go
+  handle action() with go
+
+-- ============================================================
+-- HTTP helpers
+-- ============================================================
+
+bodyText : HttpRequest ->{Exception} Text
+bodyText req = match HttpRequest.body req with Body bs -> Text.fromUtf8 bs
+
+jsonOk : Json -> HttpResponse
+jsonOk j = HttpResponse.ok (Body.fromText (Json.toText j))
+
+httpError : Nat -> Text -> HttpResponse
+httpError code msg =
+  HttpResponse.status.set (HttpResponse.Status.Status code msg)
+    (HttpResponse.ok (Body.fromText msg))
+
+-- ============================================================
+-- HTTP API — direct mode
+-- ============================================================
+
+-- POST /content — run saga inline, return 202
+Demo.Api.submitHandler : Sqlite.DB -> Handler {IO, Exception}
+Demo.Api.submitHandler db = Handler.Handler cases
+  req | Routes.post (root Path./ "content") req ->
+    (cid, authorId, txt) = SubmitRequest.decode (bodyText req)
+    now = Optional.getOrElse 0 (Int.toNat (deprecated.systemTimeMicroseconds() / +1000))
+    c = Content cid authorId txt now Submitted
+    HumanReview.runPure Approve do
+      ContentStore.sqliteHandler db do
+        Notifier.printHandler do
+          AIClassifier.approveAll do
+            moderationSaga c
+    HttpResponse.status.set (HttpResponse.Status.Status 202 "Accepted")
+      (jsonOk (Json.object [("id", Json.text (ContentId.unwrap cid))]))
+  _ -> abort
+
+-- POST /content/:id/review — update DB, notify
+Demo.Api.reviewHandler : Sqlite.DB -> Handler {IO, Exception}
+Demo.Api.reviewHandler db = Handler.Handler cases
+  HttpRequest POST _ (URI _ _ (Path ["content", cid, "review"]) _ _) _ bd ->
+    bodyTxt = match bd with Body bs -> Text.fromUtf8 bs
+    decision = ReviewRequest.decode bodyTxt
+    match ContentStore.sqliteGet db (ContentId cid) with
+      None -> HttpResponse.notFound
+      Some c ->
+        match Content.status c with
+          PendingHumanReview _ ->
+            ContentStore.sqliteSave db (Content.status.set (Resolved decision) c)
+            Notifier.printHandler do
+              Notifier.notify (Content.authorId c) decision
+            jsonOk (Content.toJson (Content.status.set (Resolved decision) c))
+          _ -> httpError 409 "Content is not pending human review"
+  _ -> abort
+
+-- ============================================================
+-- HTTP API — Restate mode
+-- ============================================================
+
+-- POST /content — save to SQLite, fire to Restate ingress
+Demo.Api.restateSubmitHandler : Sqlite.DB -> Text -> Handler {IO, Exception}
+Demo.Api.restateSubmitHandler db restateIngress = Handler.Handler cases
+  req | Routes.post (root Path./ "content") req ->
+    (cid, authorId, txt) = SubmitRequest.decode (bodyText req)
+    now = Optional.getOrElse 0 (Int.toNat (deprecated.systemTimeMicroseconds() / +1000))
+    c = Content cid authorId txt now Submitted
+    ContentStore.sqliteHandler db do ContentStore.saveContent c
+    cidText = ContentId.unwrap cid
+    _ = Threads.run do
+      uri = URI.parse (restateIngress Text.++ "/ModerationService/moderate")
+      rq = HttpRequest.post uri (Body.fromText cidText)
+      rq1 = HttpRequest.addHeader "content-type" "application/octet-stream" rq
+      handle Http.request rq1 with Http.handler
+    HttpResponse.status.set (HttpResponse.Status.Status 202 "Accepted")
+      (jsonOk (Json.object [("id", Json.text cidText)]))
+  _ -> abort
+
+-- POST /content/:id/review — resolve the Restate awakeable
+Demo.Api.restateReviewHandler : Sqlite.DB -> Text -> Handler {IO, Exception}
+Demo.Api.restateReviewHandler db restateIngress = Handler.Handler cases
+  HttpRequest POST _ (URI _ _ (Path ["content", cid, "review"]) _ _) _ bd ->
+    bodyTxt = match bd with Body bs -> Text.fromUtf8 bs
+    decision = ReviewRequest.decode bodyTxt
+    (decTag, _) = ModerationDecision.toRow decision
+    match ContentStore.loadAwakeableId db (ContentId cid) with
+      None -> httpError 409 "Content not pending human review"
+      Some awakeId ->
+        _ = Threads.run do
+          uri = URI.parse (restateIngress Text.++ "/restate/awakeables/" Text.++ awakeId Text.++ "/resolve")
+          rq = HttpRequest.post uri (Body.fromText decTag)
+          rq1 = HttpRequest.addHeader "content-type" "application/octet-stream" rq
+          handle Http.request rq1 with Http.handler
+        jsonOk (Json.object [("id", Json.text cid), ("decision", Json.text decTag)])
+  _ -> abort
+
+-- GET /content/:id — shared between both modes
+Demo.Api.getHandler : Sqlite.DB -> Handler {IO, Exception}
+Demo.Api.getHandler db = Handler.Handler cases
+  HttpRequest GET _ (URI _ _ (Path ["content", cid]) _ _) _ _ ->
+    match ContentStore.sqliteGet db (ContentId cid) with
+      None   -> HttpResponse.notFound
+      Some c -> jsonOk (Content.toJson c)
+  _ -> abort
+
+-- ============================================================
+-- Entry points
+-- ============================================================
+
+Demo.Api.main : '{IO, Exception} ()
+Demo.Api.main = do
+  dbPath = getEnv "DB_PATH"
+  db     = Sqlite.DB.open (FilePath dbPath)
+  ContentStore.initDb db
+  apiPort = match IO.getEnv.impl "API_PORT" with
+    Right p -> p
+    Left _  -> "8080"
+  config = Config.port.set (Port apiPort) Config.default
+  serve routes =
+    Threads.run do
+      Config.serve routes config
+      Promise.read (Promise.new())
+  match IO.getEnv.impl "RESTATE_INGRESS" with
+    Left _ ->
+      r0 = Routes.default <<< Demo.Api.submitHandler db
+      r1 = r0 <<< Demo.Api.getHandler db
+      serve (r1 <<< Demo.Api.reviewHandler db)
+    Right ingress ->
+      r0 = Routes.default <<< Demo.Api.restateSubmitHandler db ingress
+      r1 = r0 <<< Demo.Api.getHandler db
+      serve (r1 <<< Demo.Api.restateReviewHandler db ingress)
 
 Demo.Worker.moderationHandler : Sqlite.DB -> '{IO, Restate.State, Restate.Ctx, Exception} Bytes
 Demo.Worker.moderationHandler db = do
@@ -606,14 +575,9 @@ Demo.Worker.main = do
     Endpoint.serve 9080 [svc]
     Promise.read (Promise.new())
 
--- Combined entry point: runs the Restate worker (port 9080) and the HTTP API
--- (API_PORT, default 8081) in a single UCM process. This avoids the UCM
--- codebase lock that would prevent two separate `ucm run` invocations.
---
--- Env vars:
---   DB_PATH         — SQLite database path (required)
---   API_PORT        — HTTP API listen port (default: 8081)
---   RESTATE_INGRESS — Restate ingress URL (default: http://localhost:8080)
+-- Combined entry point: runs worker (port 9080) and API (API_PORT, default 8081)
+-- in a single UCM process to avoid the codebase lock between two `ucm run` calls.
+-- Env vars: DB_PATH (required), API_PORT (default 8081), RESTATE_INGRESS (default http://localhost:8080)
 Demo.Restate.main : '{IO, Exception} ()
 Demo.Restate.main = do
   dbPath  = getEnv "DB_PATH"
@@ -635,55 +599,67 @@ Demo.Restate.main = do
     Promise.read (Promise.new())
 
 -- ============================================================
--- Stage 4: Claude API classifier (optional — swap in for approveAll)
+-- Tests
 -- ============================================================
 
-AIClassifier.callClaude : Text -> Text ->{Exception, Http} Text
-AIClassifier.callClaude apiKey text =
-  uri = URI.parse "https://api.anthropic.com/v1/messages"
-  msg  = Json.object [("role", Json.text "user"), ("content", Json.text ("Classify this content for moderation. Reply with ONE word only: Approve, Reject, or Escalate.\nContent: " Text.++ text))]
-  body = Json.object [("model", Json.text "claude-haiku-4-5-20251001"), ("max_tokens", Json.Number "10"), ("messages", Json.array [msg])]
-  req0 = HttpRequest.post uri (Body.fromText (Json.toText body))
-  req1 = HttpRequest.addHeader "content-type" "application/json" req0
-  req2 = HttpRequest.addHeader "anthropic-version" "2023-06-01" req1
-  req  = HttpRequest.addHeader "x-api-key" apiKey req2
-  resp = Http.request req
-  respBody = HttpResponse.bodyText resp
-  decoder = do
-    Decoder.object.at! "content" do
-      Decoder.array.at! 0 do
-        Decoder.object.at! "text" Decoder.text
-  Decoder.run decoder respBody
+moderationSaga.tests.approve : [Result]
+moderationSaga.tests.approve =
+  use test ensureEqual
+  content = Content (ContentId "c1") "alice" "hello world" 0 Submitted
+  (store, notifs) = Saga.runTest Map.empty Approve Approve content
+  test.verify do
+    ensureEqual (Some (Content.status.set (AutoModerated Approve) content)) (Map.get (ContentId "c1") store)
+    ensureEqual [("alice", Approve)] notifs
 
-AIClassifier.parseDecisionText : Text -> ModerationDecision
-AIClassifier.parseDecisionText t =
-  if Text.startsWith "Approve" t then Approve
-  else if Text.startsWith "Reject" t then Reject t
-  else Escalate t
+moderationSaga.tests.reject : [Result]
+moderationSaga.tests.reject =
+  use test ensureEqual
+  content = Content (ContentId "c2") "bob" "buy cheap pills" 0 Submitted
+  (store, notifs) = Saga.runTest Map.empty (Reject "spam") Approve content
+  test.verify do
+    ensureEqual (Some (Content.status.set (AutoModerated (Reject "spam")) content)) (Map.get (ContentId "c2") store)
+    ensureEqual [("bob", Reject "spam")] notifs
 
--- Direct mode: Claude API via Threads.run + Http.handler
-AIClassifier.claudeDirectHandler : Text -> '{g, AIClassifier} a ->{g, IO, Exception} a
-AIClassifier.claudeDirectHandler apiKey action =
-  go = cases
-    { a } -> a
-    { AIClassifier.classify text -> k } ->
-      decision = Threads.run do
-        decText = handle (AIClassifier.callClaude apiKey text) with Http.handler
-        AIClassifier.parseDecisionText decText
-      handle k decision with go
-  handle action() with go
+moderationSaga.tests.escalate : [Result]
+moderationSaga.tests.escalate =
+  use test ensureEqual
+  content = Content (ContentId "c3") "carol" "maybe ok?" 0 Submitted
+  humanDecision = Approve
+  (store, notifs) = Saga.runTest Map.empty (Escalate "uncertain") humanDecision content
+  test.verify do
+    ensureEqual (Some (Content.status.set (Resolved Approve) content)) (Map.get (ContentId "c3") store)
+    ensureEqual [("carol", Approve)] notifs
 
--- Restate mode: Claude API inside ctx.run (journaled for durability)
-AIClassifier.claudeRestateHandler : Text -> '{g, AIClassifier} a ->{g, Restate.Ctx, IO, Exception} a
-AIClassifier.claudeRestateHandler apiKey action =
-  go = cases
-    { a } -> a
-    { AIClassifier.classify text -> k } ->
-      bs = ctx.run "classify" do
-        decText = Threads.run do
-          handle (AIClassifier.callClaude apiKey text) with Http.handler
-        (tag, _) = ModerationDecision.toRow (AIClassifier.parseDecisionText decText)
-        Text.toUtf8 tag
-      decision = ModerationDecision.fromRow (Text.fromUtf8 bs) None
-      handle k decision with go
-  handle action() with go
+ModerationDecision.toJson.tests.approve : [Result]
+ModerationDecision.toJson.tests.approve =
+  test.verify do
+    test.ensureEqual (Json.object [("type", Json.text "Approve")]) (ModerationDecision.toJson Approve)
+
+ModerationDecision.toJson.tests.reject : [Result]
+ModerationDecision.toJson.tests.reject =
+  test.verify do
+    test.ensureEqual
+      (Json.object [("type", Json.text "Reject"), ("reason", Json.text "spam")])
+      (ModerationDecision.toJson (Reject "spam"))
+
+ModerationDecision.toJson.tests.escalate : [Result]
+ModerationDecision.toJson.tests.escalate =
+  test.verify do
+    test.ensureEqual
+      (Json.object [("type", Json.text "Escalate"), ("reason", Json.text "uncertain")])
+      (ModerationDecision.toJson (Escalate "uncertain"))
+
+ReviewRequest.decode.tests.approve : [Result]
+ReviewRequest.decode.tests.approve =
+  test.verify do
+    test.ensureEqual Approve (ReviewRequest.decode "{\"decision\":\"Approve\"}")
+
+ReviewRequest.decode.tests.reject : [Result]
+ReviewRequest.decode.tests.reject =
+  test.verify do
+    test.ensureEqual (Reject "spam") (ReviewRequest.decode "{\"decision\":\"Reject\",\"reason\":\"spam\"}")
+
+SubmitRequest.decode.tests.example : [Result]
+SubmitRequest.decode.tests.example = test.verify do
+  body = "{\"id\":\"c1\",\"authorId\":\"alice\",\"text\":\"hello world\"}"
+  test.ensureEqual (ContentId "c1", "alice", "hello world") (SubmitRequest.decode body)
