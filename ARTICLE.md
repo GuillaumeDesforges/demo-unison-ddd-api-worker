@@ -219,12 +219,14 @@ test> moderationSaga.tests.escalate =
 The insight here is not specific to Unison or Restate.
 It's that *effects are a design tool*, not just a runtime concept.
 
-With dependency injection, you can swap implementations, but the business logic is still coupled to whatever interface its runner expects.
-In the Go/Temporal example, `Submit` could never run in HTTP mode without being rewritten: its structure is baked into the Workflow/Activity pattern.
+Dependency injection is a well-proven pattern that solves the same core challenge: keep business logic decoupled from infrastructure so you can swap implementations and test in isolation.
+And to be fair, with enough glue code (or reflection, in languages like Python or TypeScript), you can get a long way with DI too.
 
-Effects break that coupling.
-`moderationSaga` is a pure description of what needs to happen, with no opinion about how.
-You can compose it with other sagas, lift it into a test, or change its entire execution model, just by swapping the outermost handlers.
-The unit of reuse is the business logic itself.
+The genuine advantage of algebraic effects is that *composition is first-class and zero-cost*.
+With DI, composing two services with different dependencies requires explicitly wiring them together, whether by hand or through a container.
+With effects, if `sagaA` requires `{AIClassifier, ContentStore}` and `sagaB` requires `{Notifier, ContentStore}`, then `sagaA; sagaB` automatically requires `{AIClassifier, ContentStore, Notifier}`.
+The type system tracks the union for free, and the compiler statically guarantees that all effects are handled before the program runs.
+No glue, no registration, no runtime surprises.
 
-That's composability you simply can't quite get from dependency injection.
+The business logic is the unit of reuse, and composition has no seams.
+In large and complex applications, this is a huge win.
