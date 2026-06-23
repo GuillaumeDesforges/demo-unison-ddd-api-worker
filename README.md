@@ -34,7 +34,7 @@ cd demo-unison-ddd-api-worker
 scripts/test-direct-mode.sh
 ```
 
-**Restate mode** (single command — starts Restate + worker automatically):
+**Restate mode** (single command — starts Restate + worker + API automatically):
 
 ```bash
 scripts/demo-restate-mode.sh
@@ -149,12 +149,11 @@ The saga runs in a durable worker; the API layer forwards requests to it via Res
 scripts/demo-restate-mode.sh
 ```
 
-**Or manually — three terminals, all inside `nix-shell`:**
+**Or manually — two terminals, both inside `nix-shell`:**
 
-> **Note:** Restate mode requires two concurrent `ucm run` processes. If the
-> Unison MCP server is active (e.g. via Claude Code), a third UCM process
-> cannot obtain the codebase lock. Either stop the MCP server, or use
-> `scripts/demo-restate-mode.sh` which manages both server and worker.
+> **Note:** UCM allows only one process to hold the codebase lock at a time.
+> `Demo.Restate.main` solves this by running the Restate worker (port 9080)
+> and the HTTP API (port 8081) in a single UCM process.
 
 **Terminal 1 — Restate server:**
 
@@ -162,31 +161,21 @@ scripts/demo-restate-mode.sh
 restate-server --base-dir $(mktemp -d)
 ```
 
-**Terminal 2 — saga worker (port 9080):**
+**Terminal 2 — worker + HTTP API (single UCM process):**
 
 ```bash
 export DB_PATH=/tmp/mod-restate.db
-ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Worker.main'
+DB_PATH=$DB_PATH RESTATE_INGRESS=http://localhost:8080 \
+  ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Restate.main'
 ```
 
-**Terminal 3 — register, start API, test:**
+**Register and test (same terminal, after both services are up):**
 
 ```bash
-export DB_PATH=/tmp/mod-restate.db
-
-# Wait for worker
-until [ "$(curl -so /dev/null -w '%{http_code}' http://localhost:9080/discover 2>/dev/null)" = "200" ]; do
-  echo "waiting for worker..."; sleep 1
-done
-
-# Register worker with Restate (once per worker start)
+# Register worker with Restate (once per start)
 curl -X POST http://localhost:9070/deployments \
   -H 'content-type: application/json' \
   -d '{"uri":"http://localhost:9080","use_http_11":true}'
-
-# Start the HTTP API on port 8081 (Restate takes 8080)
-API_PORT=8081 RESTATE_INGRESS=http://localhost:8080 \
-  ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Api.main' &
 
 # Submit content
 curl -X POST http://localhost:8081/content \
@@ -194,6 +183,7 @@ curl -X POST http://localhost:8081/content \
   -d '{"id":"c2","authorId":"bob","text":"Hello Restate"}'
 # → {"id":"c2"}
 
+# Poll until moderated (Restate is async)
 curl http://localhost:8081/content/c2
 # → {"status":{"type":"AutoModerated","decision":{"type":"Approve"}},...}
 ```
@@ -215,35 +205,12 @@ curl http://localhost:8081/content/c2
 # → {"status":{"type":"Resolved"},"decision":{"type":"Approve"}}
 ```
 
-### Without the API (Restate ingress directly)
-
-If only one UCM process is available (e.g. MCP server is active), skip
-`Demo.Api.main` and interact with Restate directly after the worker is running:
-
-```bash
-# Seed SQLite manually
-sqlite3 $DB_PATH "CREATE TABLE IF NOT EXISTS content (
-  id TEXT PRIMARY KEY, author_id TEXT NOT NULL, text_content TEXT NOT NULL,
-  created_at INTEGER NOT NULL, status TEXT NOT NULL,
-  decision TEXT, decision_reason TEXT, awakeable_id TEXT)"
-sqlite3 $DB_PATH "INSERT INTO content VALUES (
-  'c3','alice','Hello world',1234567890,'Submitted',NULL,NULL,NULL)"
-
-# Invoke via Restate ingress
-curl -X POST http://localhost:8080/ModerationService/moderate \
-  -H 'content-type: application/octet-stream' \
-  --data-raw 'c3' --max-time 30
-
-sqlite3 $DB_PATH "SELECT status, decision FROM content WHERE id='c3'"
-# → AutoModerated|Approve
-```
-
 ## Scripts
 
 | Script | What it does |
 |---|---|
 | `scripts/test-direct-mode.sh` | Self-contained direct mode test (starts/stops API) |
-| `scripts/demo-restate-mode.sh` | Self-contained Restate demo (starts Restate + worker) |
+| `scripts/demo-restate-mode.sh` | Self-contained Restate demo (starts Restate + combined worker+API) |
 | `scripts/test-restate-mode.sh` | Restate test against pre-started Restate + worker |
 | `scripts/test-integration.sh` | Both modes; Restate portion skipped if not running |
 
@@ -274,12 +241,13 @@ PROJECT.md              — living design doc (goals, decisions, roadmap)
 | `AIClassifier.claudeRestateHandler` | `Text -> '{g, AIClassifier} a ->{g, Ctx, IO, Exception} a` | Claude API (Restate) |
 | `HumanReview.awakeableHandler` | `DB -> '{g, HumanReview} a ->{g, Ctx, IO, Exception} a` | Restate awakeable |
 | `Demo.Api.main` | `'{IO, Exception} ()` | HTTP API — direct (no env) or Restate (`RESTATE_INGRESS` set) |
-| `Demo.Worker.main` | `'{IO, Exception} ()` | Restate worker (port 9080) |
+| `Demo.Worker.main` | `'{IO, Exception} ()` | Restate worker only (port 9080) |
+| `Demo.Restate.main` | `'{IO, Exception} ()` | Worker (port 9080) + HTTP API (port 8081) in one process |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `DB_PATH` | required | Path to SQLite database file |
-| `API_PORT` | `8080` | Port for `Demo.Api.main` |
-| `RESTATE_INGRESS` | unset | If set, enables Restate mode in `Demo.Api.main` |
+| `API_PORT` | `8080` / `8081` | Port for `Demo.Api.main` / `Demo.Restate.main` |
+| `RESTATE_INGRESS` | unset | Restate ingress URL; required for `Demo.Restate.main` |

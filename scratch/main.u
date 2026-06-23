@@ -606,6 +606,34 @@ Demo.Worker.main = do
     Endpoint.serve 9080 [svc]
     Promise.read (Promise.new())
 
+-- Combined entry point: runs the Restate worker (port 9080) and the HTTP API
+-- (API_PORT, default 8081) in a single UCM process. This avoids the UCM
+-- codebase lock that would prevent two separate `ucm run` invocations.
+--
+-- Env vars:
+--   DB_PATH         — SQLite database path (required)
+--   API_PORT        — HTTP API listen port (default: 8081)
+--   RESTATE_INGRESS — Restate ingress URL (default: http://localhost:8080)
+Demo.Restate.main : '{IO, Exception} ()
+Demo.Restate.main = do
+  dbPath  = getEnv "DB_PATH"
+  db      = Sqlite.DB.open (FilePath dbPath)
+  ContentStore.initDb db
+  apiPort = match IO.getEnv.impl "API_PORT" with
+    Right p -> p
+    Left _  -> "8081"
+  ingress = match IO.getEnv.impl "RESTATE_INGRESS" with
+    Right i -> i
+    Left _  -> "http://localhost:8080"
+  hdl = HandlerDef.HandlerDef "moderate" (Demo.Worker.moderationHandler db)
+  svc = ServiceDef.ServiceDef "ModerationService" RsService [hdl]
+  Threads.run do
+    Endpoint.serve 9080 [svc]
+    r0 = Routes.default <<< Demo.Api.restateSubmitHandler db ingress
+    r1 = r0 <<< Demo.Api.getHandler db
+    Config.serve (r1 <<< Demo.Api.restateReviewHandler db ingress) (Config.port.set (Port apiPort) Config.default)
+    Promise.read (Promise.new())
+
 -- ============================================================
 -- Stage 4: Claude API classifier (optional — swap in for approveAll)
 -- ============================================================
