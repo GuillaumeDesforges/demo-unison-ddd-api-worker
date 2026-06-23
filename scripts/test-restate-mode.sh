@@ -20,7 +20,7 @@ echo "=== Init DB and insert content ==="
 sqlite3 "$DB" "CREATE TABLE IF NOT EXISTS content (
   id TEXT PRIMARY KEY, author_id TEXT NOT NULL, text_content TEXT NOT NULL,
   created_at INTEGER NOT NULL, status TEXT NOT NULL,
-  decision TEXT, decision_reason TEXT, awakeable_id TEXT)"
+  decision TEXT, decision_reason TEXT)"
 sqlite3 "$DB" "DELETE FROM content WHERE id = '$CID'"
 sqlite3 "$DB" "INSERT INTO content (id, author_id, text_content, created_at, status)
   VALUES ('$CID', 'alice', 'Hello Restate', 1234567890, 'Submitted')"
@@ -52,8 +52,7 @@ echo "PASS: status=$STATUS, decision=$DECISION"
 
 echo ""
 echo "=== Human review flow (manual) ==="
-echo "To test awakeable (human review), first change the classifier stub"
-echo "to return Escalate, then after the saga suspends:"
-echo "  AWAKE=\$(sqlite3 $DB \"SELECT awakeable_id FROM content WHERE id='$CID'\")"
-echo "  curl -X POST $RESTATE_INGRESS/restate/awakeables/\$AWAKE/resolve \\"
-echo "    -H 'content-type: application/octet-stream' --data-raw 'Approve'"
+echo "To test escalation: change the classifier stub to return Escalate,"
+echo "then after the saga completes (status=PendingHumanReview):"
+echo "  curl -X POST $RESTATE_INGRESS/ModerationService/moderate/content/$CID/review \\"
+echo "    -H 'content-type: application/json' -d '{\"decision\":\"Approve\"}'"

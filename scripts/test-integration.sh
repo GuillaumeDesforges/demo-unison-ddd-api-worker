@@ -68,7 +68,7 @@ else
   sqlite3 "$DB_RESTATE" "CREATE TABLE IF NOT EXISTS content (
     id TEXT PRIMARY KEY, author_id TEXT NOT NULL, text_content TEXT NOT NULL,
     created_at INTEGER NOT NULL, status TEXT NOT NULL,
-    decision TEXT, decision_reason TEXT, awakeable_id TEXT)" 2>/dev/null || true
+    decision TEXT, decision_reason TEXT)" 2>/dev/null || true
   sqlite3 "$DB_RESTATE" "DELETE FROM content WHERE id = '$CID_RESTATE'"
   sqlite3 "$DB_RESTATE" "INSERT INTO content (id, author_id, text_content, created_at, status)
     VALUES ('$CID_RESTATE', 'bob', 'Hello Restate', 1234567890, 'Submitted')"
