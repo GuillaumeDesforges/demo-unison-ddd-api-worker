@@ -71,21 +71,25 @@ type ModerationDecision
 
 ## Prerequisites
 
-All tools come from `shell.nix` — always work inside `nix-shell`.
+All tools (UCM, SQLite, Restate, curl, jq, Rust) come from `shell.nix` — always work inside `nix-shell`.
+
+**1. Clone this repo and the Restate SDK (sibling directories):**
 
 ```bash
+git clone https://github.com/GuillaumeDesforges/restate-sdk-unison
+git clone <this-repo>
 cd demo-unison-ddd-api-worker
+```
+
+**2. Enter the nix shell:**
+
+```bash
 nix-shell
 ```
 
-The nix shell sets `SQLITE_LIB_PATH` and `LD_LIBRARY_PATH` for you.
+The first time, `nix-shell` will build the Restate native Rust library (~2 min). Subsequent entries are instant. It also sets `SQLITE_LIB_PATH` and `LD_LIBRARY_PATH` automatically.
 
-**Restate mode only** — build the native Rust SDK once:
-
-```bash
-cargo build --release \
-  --manifest-path ../restatedev-sdk-unison/crates/restate-sdk-unison-native/Cargo.toml
-```
+Direct mode works without the SDK sibling — only Restate mode needs it.
 
 ## Direct Mode
 
@@ -97,6 +101,12 @@ nix-shell
 export DB_PATH=$(mktemp /tmp/mod-XXXXXX.db)
 ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Api.main' &
 
+# Wait for the server to be ready (~10 seconds on first run)
+until curl -sf http://localhost:8080/content/probe >/dev/null 2>&1 || \
+      [ "$(curl -so /dev/null -w '%{http_code}' http://localhost:8080/content/probe 2>/dev/null)" = "404" ]; do
+  echo "waiting for server..."; sleep 1
+done
+
 # Submit content
 curl -X POST http://localhost:8080/content \
   -H 'content-type: application/json' \
@@ -107,6 +117,12 @@ curl -X POST http://localhost:8080/content \
 curl http://localhost:8080/content/c1
 # → {"id":"c1","authorId":"alice","text":"Hello world","createdAt":...,
 #    "status":{"type":"AutoModerated","decision":{"type":"Approve"}}}
+```
+
+Or just run the self-contained test script:
+
+```bash
+scripts/test-direct-mode.sh
 ```
 
 ## Restate Mode
@@ -136,6 +152,11 @@ ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Worker.main'
 
 ```bash
 export DB_PATH=/tmp/mod-restate.db
+
+# Wait for worker to be ready
+until [ "$(curl -so /dev/null -w '%{http_code}' http://localhost:9080/discover 2>/dev/null)" = "200" ]; do
+  echo "waiting for worker..."; sleep 1
+done
 
 # Register worker with Restate (once per worker start)
 curl -X POST http://localhost:9070/deployments \
