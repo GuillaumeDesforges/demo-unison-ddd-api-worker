@@ -7,16 +7,16 @@ without changing a line of saga code.
 ## The Core Idea
 
 ```
-moderationSaga : Content ->{ContentStore, AIClassifier, Notifier, HumanReview} ()
+moderationSaga : Content ->{ContentStore, AIClassifier, Notifier} ()
 ```
 
 This function is written once. The execution backend is selected at startup by
 choosing which **interpreters** to wrap around it:
 
-| Mode | ContentStore | AIClassifier | Notifier | HumanReview |
-|------|-------------|--------------|----------|-------------|
-| Direct | SQLite (inline) | stub → Approve | `printLine` | fixed decision |
-| Restate | SQLite via `ctx.run` | stub via `ctx.run` | `printLine` via `ctx.run` | `ctx.awakeable` |
+| Mode | ContentStore | AIClassifier | Notifier |
+|------|-------------|--------------|----------|
+| Direct | SQLite (inline) | stub → Approve | `printLine` |
+| Restate | SQLite via `ctx.run` | stub via `ctx.run` | `printLine` via `ctx.run` |
 
 The saga is never touched. Only the `handle ... with` wrappers differ.
 
@@ -67,7 +67,7 @@ The first run builds the Restate native Rust library (~2 min); subsequent runs a
           ┌──────────────────▼──────────────────────────┐
           │  Demo.Worker.main  (port 9080)               │
           │  – runs moderationSaga with Restate          │
-          │    interpreters (ctx.run / ctx.awakeable)    │
+          │    interpreters (ctx.run)                    │
           └──────────────────────────────────────────────┘
                      │
           ┌──────────▼─────────────────────────────────┐
@@ -176,22 +176,22 @@ curl http://localhost:8081/content/c2
 # → {"status":{"type":"AutoModerated","decision":{"type":"Approve"}},...}
 ```
 
-### Human Review Flow (Restate mode)
+### Human Review Flow
 
-The default stub classifier always returns `Approve`. To test the awakeable
-(human review) path, swap `AIClassifier.restateHandler` for one that returns
-`Escalate`, or resolve the awakeable manually:
+When the classifier returns `Escalate`, the saga saves the content as
+`PendingHumanReview` and notifies the author. A reviewer then resolves it via:
 
 ```bash
-AWAKE=$(sqlite3 $DB_PATH "SELECT awakeable_id FROM content WHERE id='c2'")
-
-curl -X POST "http://localhost:8080/restate/awakeables/$AWAKE/resolve" \
-  -H 'content-type: application/octet-stream' \
-  --data-raw 'Approve'
+curl -X POST http://localhost:8081/content/c2/review \
+  -H 'content-type: application/json' \
+  -d '{"decision":"Approve"}'
 
 curl http://localhost:8081/content/c2
 # → {"status":{"type":"Resolved","decision":{"type":"Approve"}},...}
 ```
+
+The default stub classifier always returns `Approve`. To trigger escalation,
+swap `AIClassifier.approveAll` for a stub that returns `Escalate`.
 
 ## Scripts
 
