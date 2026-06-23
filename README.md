@@ -41,6 +41,7 @@ scripts/demo-restate-mode.sh
 ```
 
 Both scripts auto-invoke `nix-shell` — no manual environment setup needed.
+(`test-restate-mode.sh` and `test-integration.sh` require you to be inside `nix-shell` already.)
 The first run builds the Restate native Rust library (~2 min); subsequent runs are instant.
 
 ## Architecture
@@ -214,7 +215,8 @@ curl http://localhost:8081/content/c2
 | `scripts/test-restate-mode.sh` | Restate test against pre-started Restate + worker |
 | `scripts/test-integration.sh` | Both modes; Restate portion skipped if not running |
 
-All scripts auto-invoke `nix-shell` when run outside of one.
+`test-direct-mode.sh` and `demo-restate-mode.sh` auto-invoke `nix-shell` when run outside of one.
+`test-restate-mode.sh` and `test-integration.sh` require you to already be inside `nix-shell`.
 
 ## Project Structure
 
@@ -225,7 +227,7 @@ scripts/
   demo-restate-mode.sh  — Restate mode demo (self-contained)
   test-restate-mode.sh  — Restate mode test (requires running services)
   test-integration.sh   — combined test
-shell.nix               — UCM, SQLite, Restate, curl, jq
+shell.nix               — UCM, SQLite, Restate, curl, jq, cargo, rustc
 PROJECT.md              — living design doc (goals, decisions, roadmap)
 ```
 
@@ -250,4 +252,4 @@ PROJECT.md              — living design doc (goals, decisions, roadmap)
 |---|---|---|
 | `DB_PATH` | required | Path to SQLite database file |
 | `API_PORT` | `8080` / `8081` | Port for `Demo.Api.main` / `Demo.Restate.main` |
-| `RESTATE_INGRESS` | unset | Restate ingress URL; required for `Demo.Restate.main` |
+| `RESTATE_INGRESS` | unset / `http://localhost:8080` | Restate ingress URL; `Demo.Restate.main` defaults to `http://localhost:8080` if unset |
