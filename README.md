@@ -149,7 +149,7 @@ The saga runs in a durable worker; the API layer forwards requests to it via Res
 scripts/demo-restate-mode.sh
 ```
 
-**Or manually — two terminals, both inside `nix-shell`:**
+**Or manually — three terminals, all inside `nix-shell`:**
 
 > **Note:** UCM allows only one process to hold the codebase lock at a time.
 > `Demo.Restate.main` solves this by running the Restate worker (port 9080)
@@ -169,7 +169,7 @@ DB_PATH=$DB_PATH RESTATE_INGRESS=http://localhost:8080 \
   ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Restate.main'
 ```
 
-**Register and test (same terminal, after both services are up):**
+**Terminal 3 — register and test (after both services are up):**
 
 ```bash
 # Register worker with Restate (once per start)
@@ -202,7 +202,7 @@ curl -X POST "http://localhost:8080/restate/awakeables/$AWAKE/resolve" \
   --data-raw 'Approve'
 
 curl http://localhost:8081/content/c2
-# → {"status":{"type":"Resolved"},"decision":{"type":"Approve"}}
+# → {"status":{"type":"Resolved","decision":{"type":"Approve"}},...}
 ```
 
 ## Scripts
