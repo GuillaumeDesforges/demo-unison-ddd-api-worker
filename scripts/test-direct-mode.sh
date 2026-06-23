@@ -1,5 +1,12 @@
 #!/usr/bin/env bash
 # Integration test for direct mode: start API, submit content, verify AutoModerated Approve.
+# Safe to run directly — auto-invokes nix-shell if needed.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -z "${IN_NIX_SHELL:-}" ]; then
+  exec nix-shell "$SCRIPT_DIR/../shell.nix" --run "bash $0 $*"
+fi
+
 set -euo pipefail
 
 DB=$(mktemp /tmp/moderation-XXXXXX.db)

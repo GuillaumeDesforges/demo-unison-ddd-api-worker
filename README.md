@@ -20,6 +20,29 @@ choosing which **interpreters** to wrap around it:
 
 The saga is never touched. Only the `handle ... with` wrappers differ.
 
+## Quick Start
+
+```bash
+git clone https://github.com/GuillaumeDesforges/restate-sdk-unison ../restatedev-sdk-unison
+git clone <this-repo>
+cd demo-unison-ddd-api-worker
+```
+
+**Direct mode** (single command):
+
+```bash
+scripts/test-direct-mode.sh
+```
+
+**Restate mode** (single command — starts Restate + worker automatically):
+
+```bash
+scripts/demo-restate-mode.sh
+```
+
+Both scripts auto-invoke `nix-shell` — no manual environment setup needed.
+The first run builds the Restate native Rust library (~2 min); subsequent runs are instant.
+
 ## Architecture
 
 ```
@@ -71,29 +94,30 @@ type ModerationDecision
 
 ## Prerequisites
 
-All tools (UCM, SQLite, Restate, curl, jq, Rust) come from `shell.nix` — always work inside `nix-shell`.
+All tools (UCM, SQLite, Restate, curl, jq, Rust) come from `shell.nix`.
+The scripts auto-enter `nix-shell` — you don't need to do it yourself.
 
-**1. Clone this repo and the Restate SDK (sibling directories):**
-
-```bash
-git clone https://github.com/GuillaumeDesforges/restate-sdk-unison
-git clone <this-repo>
-cd demo-unison-ddd-api-worker
-```
-
-**2. Enter the nix shell:**
+**Clone the Restate SDK sibling (required for Restate mode):**
 
 ```bash
-nix-shell
+git clone https://github.com/GuillaumeDesforges/restate-sdk-unison ../restatedev-sdk-unison
 ```
 
-The first time, `nix-shell` will build the Restate native Rust library (~2 min). Subsequent entries are instant. It also sets `SQLITE_LIB_PATH` and `LD_LIBRARY_PATH` automatically.
-
-Direct mode works without the SDK sibling — only Restate mode needs it.
+Direct mode works without this sibling. The first `nix-shell` entry after
+cloning builds the Restate native Rust library (~2 min); subsequent entries
+are instant.
 
 ## Direct Mode
 
-Single terminal. The HTTP API runs the saga inline on every `POST /content`.
+The HTTP API runs the saga inline. Single process, synchronous.
+
+**Run the self-contained test:**
+
+```bash
+scripts/test-direct-mode.sh
+```
+
+**Or manually (inside `nix-shell`):**
 
 ```bash
 nix-shell
@@ -101,39 +125,36 @@ nix-shell
 export DB_PATH=$(mktemp /tmp/mod-XXXXXX.db)
 ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Api.main' &
 
-# Wait for the server to be ready (~10 seconds on first run)
-until curl -sf http://localhost:8080/content/probe >/dev/null 2>&1 || \
-      [ "$(curl -so /dev/null -w '%{http_code}' http://localhost:8080/content/probe 2>/dev/null)" = "404" ]; do
-  echo "waiting for server..."; sleep 1
+# Wait for server to be ready (~10 seconds on first run)
+until [ "$(curl -so /dev/null -w '%{http_code}' http://localhost:8080/content/probe 2>/dev/null)" = "404" ]; do
+  echo "waiting..."; sleep 1
 done
 
-# Submit content
 curl -X POST http://localhost:8080/content \
   -H 'content-type: application/json' \
   -d '{"id":"c1","authorId":"alice","text":"Hello world"}'
 # → {"id":"c1"}
 
-# Poll result — saga runs synchronously, so it's already done
 curl http://localhost:8080/content/c1
-# → {"id":"c1","authorId":"alice","text":"Hello world","createdAt":...,
-#    "status":{"type":"AutoModerated","decision":{"type":"Approve"}}}
-```
-
-Or just run the self-contained test script:
-
-```bash
-scripts/test-direct-mode.sh
+# → {"status":{"type":"AutoModerated","decision":{"type":"Approve"}},...}
 ```
 
 ## Restate Mode
 
-Three terminals, all inside `nix-shell`. The saga runs in the worker via
-Restate's durable execution; the HTTP API layer forwards requests to it.
+The saga runs in a durable worker; the API layer forwards requests to it via Restate.
 
-> **Note:** Restate mode requires two concurrent `ucm run` processes. If you
-> are using the Unison MCP server (e.g. via Claude Code), a third UCM process
-> cannot obtain the codebase lock. Stop the MCP server before running Restate
-> mode, or test it with the raw Restate ingress commands below.
+**Run the self-contained demo (starts everything automatically):**
+
+```bash
+scripts/demo-restate-mode.sh
+```
+
+**Or manually — three terminals, all inside `nix-shell`:**
+
+> **Note:** Restate mode requires two concurrent `ucm run` processes. If the
+> Unison MCP server is active (e.g. via Claude Code), a third UCM process
+> cannot obtain the codebase lock. Either stop the MCP server, or use
+> `scripts/demo-restate-mode.sh` which manages both server and worker.
 
 **Terminal 1 — Restate server:**
 
@@ -153,7 +174,7 @@ ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Worker.main'
 ```bash
 export DB_PATH=/tmp/mod-restate.db
 
-# Wait for worker to be ready
+# Wait for worker
 until [ "$(curl -so /dev/null -w '%{http_code}' http://localhost:9080/discover 2>/dev/null)" = "200" ]; do
   echo "waiting for worker..."; sleep 1
 done
@@ -167,16 +188,14 @@ curl -X POST http://localhost:9070/deployments \
 API_PORT=8081 RESTATE_INGRESS=http://localhost:8080 \
   ucm run '@guillaumedesforges/demo-unison-ddd-api-worker/main:.Demo.Api.main' &
 
-# Submit content — API saves to SQLite, then invokes ModerationService via Restate
+# Submit content
 curl -X POST http://localhost:8081/content \
   -H 'content-type: application/json' \
   -d '{"id":"c2","authorId":"bob","text":"Hello Restate"}'
 # → {"id":"c2"}
 
-# Poll result
 curl http://localhost:8081/content/c2
-# → {"id":"c2","authorId":"bob","text":"Hello Restate","createdAt":...,
-#    "status":{"type":"AutoModerated","decision":{"type":"Approve"}}}
+# → {"status":{"type":"AutoModerated","decision":{"type":"Approve"}},...}
 ```
 
 ### Human Review Flow (Restate mode)
@@ -186,10 +205,8 @@ The default stub classifier always returns `Approve`. To test the awakeable
 `Escalate`, or resolve the awakeable manually:
 
 ```bash
-# Get the awakeable ID stored by the worker when it suspended
 AWAKE=$(sqlite3 $DB_PATH "SELECT awakeable_id FROM content WHERE id='c2'")
 
-# Deliver the human decision — worker resumes immediately
 curl -X POST "http://localhost:8080/restate/awakeables/$AWAKE/resolve" \
   -H 'content-type: application/octet-stream' \
   --data-raw 'Approve'
@@ -200,13 +217,11 @@ curl http://localhost:8081/content/c2
 
 ### Without the API (Restate ingress directly)
 
-If you can only run one UCM process (e.g. MCP server already active), skip
-starting `Demo.Api.main` and interact with Restate directly:
+If only one UCM process is available (e.g. MCP server is active), skip
+`Demo.Api.main` and interact with Restate directly after the worker is running:
 
 ```bash
-export DB_PATH=/tmp/mod-restate.db
-
-# Seed SQLite (the API would normally do this on POST /content)
+# Seed SQLite manually
 sqlite3 $DB_PATH "CREATE TABLE IF NOT EXISTS content (
   id TEXT PRIMARY KEY, author_id TEXT NOT NULL, text_content TEXT NOT NULL,
   created_at INTEGER NOT NULL, status TEXT NOT NULL,
@@ -214,36 +229,34 @@ sqlite3 $DB_PATH "CREATE TABLE IF NOT EXISTS content (
 sqlite3 $DB_PATH "INSERT INTO content VALUES (
   'c3','alice','Hello world',1234567890,'Submitted',NULL,NULL,NULL)"
 
-# Invoke the worker via Restate ingress
+# Invoke via Restate ingress
 curl -X POST http://localhost:8080/ModerationService/moderate \
   -H 'content-type: application/octet-stream' \
   --data-raw 'c3' --max-time 30
 
-# Check result in SQLite
 sqlite3 $DB_PATH "SELECT status, decision FROM content WHERE id='c3'"
 # → AutoModerated|Approve
 ```
 
-## Running Tests
+## Scripts
 
-```bash
-# Direct mode only (fully self-contained, starts/stops its own server)
-scripts/test-direct-mode.sh
+| Script | What it does |
+|---|---|
+| `scripts/test-direct-mode.sh` | Self-contained direct mode test (starts/stops API) |
+| `scripts/demo-restate-mode.sh` | Self-contained Restate demo (starts Restate + worker) |
+| `scripts/test-restate-mode.sh` | Restate test against pre-started Restate + worker |
+| `scripts/test-integration.sh` | Both modes; Restate portion skipped if not running |
 
-# Restate mode (requires Restate server + worker already running)
-DB_PATH=/tmp/mod-restate.db scripts/test-restate-mode.sh
-
-# Both
-scripts/test-integration.sh
-```
+All scripts auto-invoke `nix-shell` when run outside of one.
 
 ## Project Structure
 
 ```
 scratch/main.u          — all Unison code (single file)
 scripts/
-  test-direct-mode.sh   — direct mode integration test
-  test-restate-mode.sh  — Restate mode integration test
+  test-direct-mode.sh   — direct mode integration test (self-contained)
+  demo-restate-mode.sh  — Restate mode demo (self-contained)
+  test-restate-mode.sh  — Restate mode test (requires running services)
   test-integration.sh   — combined test
 shell.nix               — UCM, SQLite, Restate, curl, jq
 PROJECT.md              — living design doc (goals, decisions, roadmap)
