@@ -15,67 +15,7 @@ The saga is written once against abstract Abilities. No saga code changes when s
 
 **Content moderation queue.** Users submit text posts for moderation. An AI classifier (initially a stub) makes an auto-moderation decision. Uncertain content is escalated to a human reviewer.
 
-### Types
-
-```
-type ContentId = ContentId Text   -- UUID, provided by client
-
-type Content = {
-  id        : ContentId,
-  authorId  : Text,
-  text      : Text,
-  createdAt : Nat,              -- Unix timestamp ms
-  status    : ContentStatus
-}
-
-type ContentStatus
-  = Submitted
-  | AutoModerated ModerationDecision
-  | PendingHumanReview ModerationDecision   -- escalated AI decision preserved
-  | Resolved ModerationDecision
-
-type ModerationDecision
-  = Approve
-  | Reject Text      -- reason
-  | Escalate Text    -- reason (AI uncertain, send to human)
-```
-
-### Abilities
-
-```
-ability ContentStore where
-  getContent  : ContentId -> Optional Content
-  saveContent : Content -> ()
-
-ability AIClassifier where
-  classify : Text -> ModerationDecision
-
-ability Notifier where
-  notify : Text -> ModerationDecision -> ()   -- authorId, outcome
-
-ability HumanReview where
-  waitForDecision : ContentId -> ModerationDecision
-```
-
-### Saga
-
-```
-moderationSaga : Content ->{ContentStore, AIClassifier, Notifier, HumanReview} ()
-```
-
-Steps (equivalent to Temporal activities):
-1. Save content as `Submitted`
-2. Call AI classifier → get `ModerationDecision`
-3. If `Approve` or `Reject`: save final status, notify author
-4. If `Escalate`: save as `PendingHumanReview`, wait for human decision, save final status, notify author
-
-### HTTP API
-
-```
-POST /content                   -- submit { id, authorId, text }; returns 202
-GET  /content/:id               -- returns current Content state
-POST /content/:id/review        -- human moderator submits { decision, reason? }
-```
+See `scratch/main.u` for the domain types (`Content`, `ContentStatus`, `ModerationDecision`), the four abilities (`ContentStore`, `AIClassifier`, `Notifier`, `HumanReview`), and the saga implementation.
 
 ## Architecture decisions
 
@@ -118,68 +58,10 @@ In direct mode, `waitForDecision` is not reachable in normal flow (the stub clas
 
 All Unison code lives in `scratch/main.u`. UCM codebase at `~/.config/unisonlanguage/` under project `@guillaumedesforges/demo-unison-ddd-api-worker`.
 
-## Project structure
-
-```
-demo-unison-ddd-api-worker/
-├── CLAUDE.md
-├── PROJECT.md
-├── README.md
-├── shell.nix                   -- UCM, SQLite, Restate, curl, jq, cargo, rustc
-├── .mcp.json                   -- Unison MCP server
-├── .claude/settings.json
-├── scratch/
-│   └── main.u                  -- all Unison code
-└── scripts/
-    ├── test-integration.sh     -- direct + Restate mode (skips Restate if not running)
-    ├── test-direct-mode.sh     -- direct mode only, self-contained (auto-enters nix-shell)
-    ├── test-restate-mode.sh    -- Restate mode only
-    └── demo-restate-mode.sh    -- interactive demo script for Restate mode
-```
-
 ## Status
 
 **Phase: Stage 4 — Polish — complete. Demo fully reproducible.**
 
 ## Roadmap
 
-### Stage 1 — Domain types and saga (unit tests) ✅
-
-- [x] Define `Content`, `ContentId`, `ContentStatus`, `ModerationDecision`
-- [x] Define the four abilities
-- [x] Write `moderationSaga` against the abilities
-- [x] Unit test the saga with pure stub interpreters (no IO)
-
-### Stage 2 — Direct interpreter (HTTP API, direct mode)
-
-- [x] SQLite interpreter for `ContentStore`
-- [x] Stub interpreter for `AIClassifier` (`approveAll` — always returns `Approve`)
-- [x] Print-to-stdout interpreter for `Notifier` (`printHandler`)
-- [x] Pure stub interpreter for `HumanReview` (`runPure` — returns fixed decision)
-- [x] `Demo.Api.main` HTTP server with all three routes
-- [x] Integration test: submit → poll → verify `AutoModerated Approve` (`scripts/test-direct-mode.sh`)
-
-### Stage 3 — Restate interpreter (worker, Restate mode)
-
-- [x] Restate `ctx.run` interpreter for `AIClassifier` and `Notifier`
-- [x] Restate `ctx.run` interpreter for `ContentStore` (saves durable; reads direct)
-- [x] Restate awakeable interpreter for `HumanReview` (creates awakeable, stores ID in SQLite)
-- [x] `Demo.Worker.main` Restate service endpoint (port 9080, `ModerationService/moderate`)
-- [x] Integration test script: insert content → invoke via Restate ingress → verify AutoModerated Approve (`scripts/test-restate-mode.sh`)
-- [ ] Integration test: human review flow via awakeable (manual steps documented in script)
-
-### Stage 4 — Polish ✅
-
-- [x] Claude API interpreter for `AIClassifier` (`claudeDirectHandler`, `claudeRestateHandler`)
-  - `callClaude`: POST to Claude API, parse `content[0].text` from response
-  - Wraps in `ctx.run` for Restate mode durability
-  - Uses `Threads.run do handle ... with Http.handler` inside `ctx.run` thunk
-- [x] `scripts/test-integration.sh` covering both modes
-- [x] README with architecture diagram and quick-start
-- [x] Restate-aware HTTP API handlers: `restateSubmitHandler` / `restateReviewHandler`
-  - `Demo.Api.main` reads `RESTATE_INGRESS` env var: unset → direct mode on port 8080,
-    set → Restate mode (POST forwarded to Restate ingress, review resolves awakeable)
-  - `API_PORT` env var selects the listen port (default 8080; use 8081 in Restate mode)
-  - Gives identical HTTP API (`POST /content`, `GET /content/:id`, `POST .../review`)
-    regardless of backend
-- [x] All scripts updated and verified; `test-direct-mode.sh` passes standalone
+- [ ] Integration test: human review flow via awakeable (manual steps currently documented in `scripts/test-restate-mode.sh`)

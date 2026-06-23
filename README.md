@@ -80,19 +80,6 @@ The first run builds the Restate native Rust library (~2 min); subsequent runs a
 **Content moderation queue.** Users submit text posts; an AI classifier decides
 whether to Approve, Reject, or Escalate to a human reviewer.
 
-```
-type ContentStatus
-  = Submitted
-  | AutoModerated ModerationDecision
-  | PendingHumanReview ModerationDecision
-  | Resolved ModerationDecision
-
-type ModerationDecision
-  = Approve
-  | Reject Text    -- reason
-  | Escalate Text  -- reason (AI uncertain)
-```
-
 ## Prerequisites
 
 All tools (UCM, SQLite, Restate, curl, jq, Rust) come from `shell.nix`.
@@ -221,35 +208,8 @@ curl http://localhost:8081/content/c2
 ## Project Structure
 
 ```
-scratch/main.u          — all Unison code (single file)
-scripts/
-  test-direct-mode.sh   — direct mode integration test (self-contained)
-  demo-restate-mode.sh  — Restate mode demo (self-contained)
-  test-restate-mode.sh  — Restate mode test (requires running services)
-  test-integration.sh   — combined test
-shell.nix               — UCM, SQLite, Restate, curl, jq, cargo, rustc
-PROJECT.md              — living design doc (goals, decisions, roadmap)
+scratch/main.u     — all Unison code (single file)
+scripts/           — integration test and demo scripts
+shell.nix          — UCM, SQLite, Restate, curl, jq, cargo, rustc
+PROJECT.md         — living design doc (goals, decisions, roadmap)
 ```
-
-## Key Definitions
-
-| Definition | Type | Purpose |
-|---|---|---|
-| `moderationSaga` | `Content ->{ContentStore, AIClassifier, Notifier, HumanReview} ()` | The saga — same in both modes |
-| `ContentStore.sqliteHandler` | `DB -> '{g, ContentStore} a ->{g, IO, Exception} a` | Direct-mode store |
-| `ContentStore.restateHandler` | `DB -> '{g, ContentStore} a ->{g, Ctx, IO, Exception} a` | Restate-mode store |
-| `AIClassifier.approveAll` | `'{g, AIClassifier} a ->{g} a` | Stub (always Approve) |
-| `AIClassifier.claudeDirectHandler` | `Text -> '{g, AIClassifier} a ->{g, IO, Exception} a` | Claude API (direct) |
-| `AIClassifier.claudeRestateHandler` | `Text -> '{g, AIClassifier} a ->{g, Ctx, IO, Exception} a` | Claude API (Restate) |
-| `HumanReview.awakeableHandler` | `DB -> '{g, HumanReview} a ->{g, Ctx, IO, Exception} a` | Restate awakeable |
-| `Demo.Api.main` | `'{IO, Exception} ()` | HTTP API — direct (no env) or Restate (`RESTATE_INGRESS` set) |
-| `Demo.Worker.main` | `'{IO, Exception} ()` | Restate worker only (port 9080) |
-| `Demo.Restate.main` | `'{IO, Exception} ()` | Worker (port 9080) + HTTP API (port 8081) in one process |
-
-### Environment Variables
-
-| Variable | Default | Description |
-|---|---|---|
-| `DB_PATH` | required | Path to SQLite database file |
-| `API_PORT` | `8080` / `8081` | Port for `Demo.Api.main` / `Demo.Restate.main` |
-| `RESTATE_INGRESS` | unset / `http://localhost:8080` | Restate ingress URL; `Demo.Restate.main` defaults to `http://localhost:8080` if unset |
