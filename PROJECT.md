@@ -96,11 +96,11 @@ Both the HTTP API and the Restate worker connect to the same SQLite file (path f
 
 ### 3. AI classifier: stub first
 
-The `AIClassifier` ability is initially interpreted by a stub that returns `Escalate "needs review"` for all input. The Claude API implementation can be added later as a second interpreter without touching the saga.
+The `AIClassifier` ability is initially interpreted by `AIClassifier.approveAll`, a stub that returns `Approve` for all input. The Claude API implementation (`claudeDirectHandler` / `claudeRestateHandler`) can be swapped in as a second interpreter without touching the saga.
 
-### 4. Notifier: HTTP webhook
+### 4. Notifier: print to stdout
 
-The `Notifier` ability POSTs a JSON payload to the URL in the `WEBHOOK_URL` environment variable. In Restate mode, a failed webhook call is automatically retried by Restate.
+The `Notifier` ability prints the author ID and decision to stdout. In Restate mode (`Notifier.restateHandler`) the print is wrapped in `ctx.run` so it is journaled and not re-executed on replay.
 
 ### 5. HumanReview: awakeable in Restate mode
 
@@ -108,10 +108,11 @@ In Restate mode, `waitForDecision` creates a Restate awakeable, stores the awake
 
 In direct mode, `waitForDecision` is not reachable in normal flow (the stub classifier never returns `Escalate` in automated tests), but can be given a test implementation.
 
-### 6. Two entry points
+### 6. Three entry points
 
-- `Demo.Api.main` — HTTP server (port 8080), reads `--mode` flag, selects interpreters
+- `Demo.Api.main` — HTTP server (`API_PORT`, default 8080); reads `RESTATE_INGRESS` env var to select mode
 - `Demo.Worker.main` — Restate service endpoint (port 9080), runs saga with Restate interpreters
+- `Demo.Restate.main` — combined process: runs the Restate worker (port 9080) **and** the API server (`API_PORT`, default 8081) in the same UCM process, avoiding UCM's codebase lock when two `ucm run` calls would race; `RESTATE_INGRESS` defaults to `http://localhost:8080`
 
 ### 7. Single scratch file
 
@@ -123,13 +124,17 @@ All Unison code lives in `scratch/main.u`. UCM codebase at `~/.config/unisonlang
 demo-unison-ddd-api-worker/
 ├── CLAUDE.md
 ├── PROJECT.md
-├── shell.nix                   -- UCM, SQLite, Restate, curl, jq
+├── README.md
+├── shell.nix                   -- UCM, SQLite, Restate, curl, jq, cargo, rustc
 ├── .mcp.json                   -- Unison MCP server
 ├── .claude/settings.json
 ├── scratch/
 │   └── main.u                  -- all Unison code
 └── scripts/
-    └── test-integration.sh
+    ├── test-integration.sh     -- direct + Restate mode (skips Restate if not running)
+    ├── test-direct-mode.sh     -- direct mode only, self-contained (auto-enters nix-shell)
+    ├── test-restate-mode.sh    -- Restate mode only
+    └── demo-restate-mode.sh    -- interactive demo script for Restate mode
 ```
 
 ## Status
@@ -152,7 +157,7 @@ demo-unison-ddd-api-worker/
 - [x] Print-to-stdout interpreter for `Notifier` (`printHandler`)
 - [x] Pure stub interpreter for `HumanReview` (`runPure` — returns fixed decision)
 - [x] `Demo.Api.main` HTTP server with all three routes
-- [ ] Integration test: submit → poll → verify `AutoModerated Approve`
+- [x] Integration test: submit → poll → verify `AutoModerated Approve` (`scripts/test-direct-mode.sh`)
 
 ### Stage 3 — Restate interpreter (worker, Restate mode)
 
